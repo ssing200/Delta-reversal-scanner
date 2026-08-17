@@ -1,467 +1,203 @@
-    result = api_get("/v2/tickers")
+import streamlit as st
+import requests
+import pandas as pd
 
-    if not result:
-        return pd.DataFrame()
+BASE_URL = "https://api.india.delta.exchange"
 
-    rows = []
+st.set_page_config(
+    page_title="Delta Coin Scanner",
+    layout="wide"
+)
 
-    for x in result:
+st.title("🔥 Delta Coin Scanner")
+st.caption("Price + Volume + OI + Reversal Watch")
 
-        symbol = x.get("symbol")
 
-        if not symbol:
-            continue
+def get_data():
 
-        # Perpetual futures only
-        product_type = str(
-            x.get("contract_type",
-            x.get("product_type", ""))
-        ).lower()
-
-        if product_type and "perpetual" not in product_type:
-            continue
-
-        price = x.get(
-            "close",
-            x.get("mark_price",
-            x.get("spot_price", 0))
+    try:
+        response = requests.get(
+            BASE_URL + "/v2/tickers",
+            timeout=15
         )
 
-        volume = x.get(
-            "volume_24h",
-            x.get("volume", 0)
-        )
+        if response.status_code != 200:
+            return pd.DataFrame()
 
-        oi = x.get(
-            "open_interest",
-            x.get("oi", 0)
-        )
+        data = response.json()
 
-        try:
-            price = float(price or 0)
-            volume = float(volume or 0)
-            oi = float(oi or 0)
-        except:
-            continue
+        if not data.get("success"):
+            return pd.DataFrame()
 
-        if price <= 0:
-            continue
+        rows = []
 
-        rows.append({
-            "Symbol": symbol,
-            "Price": price,
-            "24H Volume": volume,
-            "OI": oi
-        })
+        for p in data.get("result", []):
 
-    df = pd.DataFrame(rows)
+            symbol = p.get("symbol")
 
-    if df.empty:
-        return df
+            if not symbol:
+                continue
 
-    df["Vol/OI"] = (
-        df["24H Volume"] /
-        df["OI"].replace(0, pd.NA)
-    )
+            # Perpetual futures only
+            contract = str(
+                p.get("contract_type", "")
+            ).lower()
 
-    df = df.dropna(subset=["Vol/OI"])
+            if contract != "perpetual_futures":
+                continue
 
-    # Highest volume first
-    df = df.sort_values(
-        "24H Volume",
-        ascending=False
-    )
-
-    return df
-
-
-def get_candles(symbol, resolution="15m", hours=12):
-
-    end = int(time.time())
-    start = end - hours * 60 * 60
-
-    result = api_get(
-        "/v2/history/candles",
-        {
-            "resolution": resolution,
-            "symbol": symbol,
-            "start": start,
-            "end": end
-        }
-    )
-
-    if not result:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(result)
-
-    if df.empty:
-        return df
-
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
-    ]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
+            price = p.get(
+                "close",
+                p.get("mark_price", 0)
             )
 
-    df = df.dropna(
-        subset=["open", "high", "low", "close"]
-    )
+            volume = p.get(
+                "volume_24h",
+                p.get("volume", 0)
+            )
 
-    # API can return newest first
-    df = df.sort_values("time")
+            oi = p.get(
+                "open_interest",
+                p.get("oi", 0)
+            )
 
-    return df
+            try:
+                price = float(price or 0)
+                volume = float(volume or 0)
+                oi = float(oi or 0)
+            except:
+                continue
 
+            if price <= 0:
+                continue
 
-def get_oi_history(symbol):
+            rows.append({
+                "Coin": symbol,
+                "Price": price,
+                "24H Volume": volume,
+                "OI": oi
+            })
 
-    end = int(time.time())
-    start = end - 12 * 60 * 60
+        df = pd.DataFrame(rows)
 
-    result = api_get(
-        "/v2/history/candles",
-        {
-            "resolution": "15m",
-            "symbol": "OI:" + symbol,
-            "start": start,
-            "end": end
-        }
-    )
+        if df.empty:
+            return df
 
-    if not result:
-        return pd.DataFrame()
+        # Volume / OI
+        df["Vol/OI"] = (
+            df["24H Volume"] /
+            df["OI"].replace(0, pd.NA)
+        )
 
-    df = pd.DataFrame(result)
+        df = df.dropna(
+            subset=["Vol/OI"]
+        )
 
-    if df.empty:
+        # Highest volume first
+        df = df.sort_values(
+            "24H Volume",
+            ascending=False
+        )
+
         return df
 
-    # OI history is represented through candle values.
-    # Usually close is the useful latest OI value.
-    if "close" in df.columns:
-        df["close"] = pd.to_numeric(
-            df["close"],
-            errors="coerce"
+    except Exception as e:
+
+        st.error(
+            "API connection error: " + str(e)
         )
 
-    df = df.dropna(subset=["close"])
-    df = df.sort_values("time")
-
-    return df
+        return pd.DataFrame()
 
 
-def analyze_symbol(symbol):
+# -----------------------------
+# GET MARKET DATA
+# -----------------------------
 
-    candles = get_candles(symbol)
+df = get_data()
 
-    if candles.empty or len(candles) < 8:
-        return None
-
-    # Last closed candle
-    last = candles.iloc[-1]
-
-    # Previous 3 candles
-    previous = candles.iloc[-4]
-
-    price_now = float(last["close"])
-    price_previous = float(previous["close"])
-
-    price_change = (
-        (price_now - price_previous)
-        / price_previous
-    ) * 100
-
-    # Average volume of previous candles
-    previous_volumes = candles[
-        "volume"
-    ].iloc[-8:-1]
-
-    avg_volume = previous_volumes.mean()
-
-    if avg_volume <= 0:
-        return None
-
-    volume_ratio = (
-        float(last["volume"])
-        / float(avg_volume)
-    )
-
-    # Candle rejection
-    bullish_candle = (
-        float(last["close"])
-        > float(last["open"])
-    )
-
-    bearish_candle = (
-        float(last["close"])
-        < float(last["open"])
-    )
-
-    # OI history
-    oi = get_oi_history(symbol)
-
-    oi_change = 0.0
-
-    if not oi.empty and len(oi) >= 5:
-
-        oi_now = float(
-            oi["close"].iloc[-1]
-        )
-
-        oi_old = float(
-            oi["close"].iloc[-5]
-        )
-
-        if oi_old != 0:
-            oi_change = (
-                (oi_now - oi_old)
-                / abs(oi_old)
-            ) * 100
-
-    # -------------------------
-    # SIGNAL LOGIC
-    # -------------------------
-
-    score = 0
-    signal = "⚪ NO SIGNAL"
-    reason = "No strong reversal confirmation"
-
-    # LONG REVERSAL
-    #
-    # Price fell
-    # Volume increased
-    # OI decreased
-    # Last candle bullish
-    #
-    if (
-        price_change <= -0.80
-        and volume_ratio >= 1.30
-        and oi_change <= -0.50
-        and bullish_candle
-    ):
-
-        score += 4
-        signal = "🟢 LONG REVERSAL WATCH"
-
-        reason = (
-            "Price fell + volume spike + "
-            "OI decreased + bullish rejection"
-        )
-
-    # SHORT REVERSAL
-    #
-    # Price rose
-    # Volume increased
-    # OI decreased
-    # Last candle bearish
-    #
-    elif (
-        price_change >= 0.80
-        and volume_ratio >= 1.30
-        and oi_change <= -0.50
-        and bearish_candle
-    ):
-
-        score += 4
-        signal = "🔴 SHORT REVERSAL WATCH"
-
-        reason = (
-            "Price rose + volume spike + "
-            "OI decreased + bearish rejection"
-        )
-
-    # EARLY LONG
-    elif (
-        price_change <= -0.80
-        and volume_ratio >= 1.50
-        and oi_change <= -0.50
-    ):
-
-        score = 2
-        signal = "🟡 EARLY LONG WATCH"
-
-        reason = (
-            "Price down + volume high + "
-            "OI falling"
-        )
-
-    # EARLY SHORT
-    elif (
-        price_change >= 0.80
-        and volume_ratio >= 1.50
-        and oi_change <= -0.50
-    ):
-
-        score = 2
-        signal = "🟠 EARLY SHORT WATCH"
-
-        reason = (
-            "Price up + volume high + "
-            "OI falling"
-        )
-
-    return {
-        "Symbol": symbol,
-        "Price Change %": round(price_change, 2),
-        "Volume Ratio": round(volume_ratio, 2),
-        "OI Change %": round(oi_change, 2),
-        "Signal": signal,
-        "Score": score,
-        "Reason": reason
-    }
-
-
-# =====================================
-# MAIN DATA
-# =====================================
-
-df = get_tickers()
 
 if df.empty:
 
     st.error(
-        "Delta API se data nahi aa raha."
+        "❌ Delta se data nahi mil raha."
     )
 
     st.stop()
 
 
-# =====================================
-# MARKET OVERVIEW
-# =====================================
+# -----------------------------
+# TOP COINS
+# -----------------------------
 
-st.subheader("📊 Market Overview")
-
-display_df = df.head(30).copy()
+st.subheader("📊 Top Perpetual Coins")
 
 st.dataframe(
-    display_df,
+    df.head(50),
     use_container_width=True,
     hide_index=True
 )
 
 
-# =====================================
-# REVERSAL SCANNER
-# =====================================
+# -----------------------------
+# REVERSAL WATCH
+# -----------------------------
 
-st.subheader("🎯 Reversal Scanner")
-
-st.info(
-    "Scanner top-volume contracts ko 15-minute "
-    "price, volume aur OI behaviour ke basis par check karta hai."
-)
-
-# Limit API calls
-scan_list = df.head(10)["Symbol"].tolist()
-
-signals = []
-
-progress = st.progress(0)
-
-for i, symbol in enumerate(scan_list):
-
-    result = analyze_symbol(symbol)
-
-    if result:
-        signals.append(result)
-
-    progress.progress(
-        int((i + 1) / len(scan_list) * 100)
-    )
-
-progress.empty()
+st.subheader("🎯 Reversal Watch")
 
 
-signals_df = pd.DataFrame(signals)
+# Vol/OI ज्यादा होने पर market activity ज्यादा है
+# यह सिर्फ WATCH signal है, guaranteed reversal नहीं।
+
+watch = df[
+    df["Vol/OI"] >= 1
+].copy()
 
 
-if signals_df.empty:
+if watch.empty:
 
-    st.warning(
-        "Abhi strong reversal data available nahi hai."
+    st.info(
+        "Abhi koi strong Vol/OI watch setup nahi mila."
     )
 
 else:
 
-    # Strong signals first
-    signals_df = signals_df.sort_values(
-        ["Score", "Price Change %"],
-        ascending=[False, False]
+    watch["Signal"] = "👀 WATCH"
+
+    watch["Reason"] = (
+        "High trading activity relative to OI"
     )
 
     st.dataframe(
-        signals_df,
+        watch[
+            [
+                "Coin",
+                "Price",
+                "24H Volume",
+                "OI",
+                "Vol/OI",
+                "Signal",
+                "Reason"
+            ]
+        ].head(30),
         use_container_width=True,
         hide_index=True
     )
 
 
-# =====================================
-# STRONG SIGNALS
-# =====================================
+# -----------------------------
+# REFRESH
+# -----------------------------
 
-st.subheader("🔥 Strong Signals")
+st.divider()
 
-if not signals_df.empty:
+if st.button("🔄 Refresh Data"):
 
-    strong = signals_df[
-        signals_df["Score"] >= 4
-    ]
+    st.rerun()
 
-    if strong.empty:
-
-        st.info(
-            "Abhi koi confirmed-style reversal watch nahi mila."
-        )
-
-    else:
-
-        st.dataframe(
-            strong,
-            use_container_width=True,
-            hide_index=True
-        )
-
-
-# =====================================
-# EXPLANATION
-# =====================================
-
-st.subheader("🧠 Signal Logic")
-
-st.write(
-    """
-    🟢 LONG REVERSAL WATCH:
-    Price down + volume spike + OI falling +
-    bullish candle rejection.
-
-    🔴 SHORT REVERSAL WATCH:
-    Price up + volume spike + OI falling +
-    bearish candle rejection.
-
-    🟡 / 🟠 EARLY WATCH:
-    Price and volume/OI conditions support a
-    possible reversal, but candle confirmation
-    is missing.
-    """
-)
 
 st.warning(
-    "⚠️ Ye prediction ya guaranteed-profit system nahi hai. "
-    "Signal ko price action, liquidity, market structure "
-    "aur risk management se confirm karein."
+    "⚠️ WATCH signal reversal की guarantee नहीं देता। "
+    "Trade लेने से पहले price action, structure break, "
+    "liquidity और risk management से confirmation करें."
 )
-
-st.caption(
-    "Data source: Delta Exchange India public market API"
-)
-अब स
