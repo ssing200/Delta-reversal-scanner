@@ -3,37 +3,42 @@ import requests
 import pandas as pd
 import time
 
+# =========================================================
+# DELTA SETTINGS
+# =========================================================
+
 BASE_URL = "https://api.india.delta.exchange"
-
-st.set_page_config(
-    page_title="Delta 220 Reversal Scanner",
-    layout="wide"
-)
-
-st.title("🔥 Delta 220 Reversal Scanner")
-st.caption(
-    "220 Coins → 1H Trend → 15m Liquidity Sweep → "
-    "5m BOS → OI Displacement → Entry Zone"
-)
-
-# =========================================================
-# SETTINGS
-# =========================================================
 
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Delta-220-Reversal-Scanner/3.0"
+    "User-Agent": "Delta-Reversal-Scanner/4.0"
 }
 
-# Cache keeps API load under control
 CACHE_SECONDS = 120
 
-# Deep analysis only for promising candidates
+# Deep analysis कितने active coins पर करना है
 DEEP_SCAN_LIMIT = 30
 
 
 # =========================================================
-# API FUNCTION
+# STREAMLIT
+# =========================================================
+
+st.set_page_config(
+    page_title="Delta Reversal Scanner",
+    layout="wide"
+)
+
+st.title("🔥 Delta Reversal Scanner")
+
+st.caption(
+    "1H Trend → 15m Liquidity Sweep → "
+    "5m BOS → OI → Funding → Volume → Entry Zone"
+)
+
+
+# =========================================================
+# API
 # =========================================================
 
 def api_get(path, params=None):
@@ -63,7 +68,7 @@ def api_get(path, params=None):
 
 
 # =========================================================
-# GET ALL LIVE PERPETUALS
+# ALL LIVE PERPETUALS
 # =========================================================
 
 @st.cache_data(ttl=CACHE_SECONDS)
@@ -93,12 +98,16 @@ def get_all_perpetuals():
             continue
 
         rows.append({
+
             "Coin": symbol,
+
             "ID": p.get("id"),
-            "Underlying": p.get(
-                "underlying_asset",
-                {}
-            ).get("symbol", "")
+
+            "Underlying":
+                p.get(
+                    "underlying_asset",
+                    {}
+                ).get("symbol", "")
         })
 
     df = pd.DataFrame(rows)
@@ -112,7 +121,7 @@ def get_all_perpetuals():
 
 
 # =========================================================
-# TICKER DATA
+# TICKERS + PRICE + VOLUME + OI + FUNDING
 # =========================================================
 
 @st.cache_data(ttl=CACHE_SECONDS)
@@ -155,18 +164,45 @@ def get_tickers():
                 ) or 0
             )
 
-        except:
+        except Exception:
 
             continue
 
         if price <= 0:
             continue
 
+        # -------------------------------------------------
+        # FUNDING
+        # -------------------------------------------------
+
+        funding_raw = p.get(
+            "funding_rate",
+            p.get("funding", None)
+        )
+
+        try:
+
+            funding = (
+                float(funding_raw)
+                if funding_raw is not None
+                else None
+            )
+
+        except Exception:
+
+            funding = None
+
         rows.append({
+
             "Coin": symbol,
+
             "Price": price,
+
             "24H Volume": volume,
-            "OI": oi
+
+            "OI": oi,
+
+            "Funding": funding
         })
 
     df = pd.DataFrame(rows)
@@ -187,7 +223,11 @@ def get_tickers():
 # =========================================================
 
 @st.cache_data(ttl=CACHE_SECONDS)
-def get_candles(symbol, resolution, hours):
+def get_candles(
+    symbol,
+    resolution,
+    hours
+):
 
     end = int(time.time())
 
@@ -237,7 +277,9 @@ def get_candles(symbol, resolution, hours):
         ]
     )
 
-    return df.sort_values("time")
+    return df.sort_values(
+        "time"
+    )
 
 
 # =========================================================
@@ -280,7 +322,9 @@ def get_oi_history(symbol):
 
     return df.dropna(
         subset=["close"]
-    ).sort_values("time")
+    ).sort_values(
+        "time"
+    )
 
 
 # =========================================================
@@ -326,14 +370,20 @@ def analyze_1h(symbol):
         ema_slow.iloc[-1]
     )
 
-    if fast > slow and last_price > fast:
+    if (
+        fast > slow
+        and last_price > fast
+    ):
 
         return {
             "trend": "🟢 BULLISH",
             "trend_score": 2
         }
 
-    if fast < slow and last_price < fast:
+    if (
+        fast < slow
+        and last_price < fast
+    ):
 
         return {
             "trend": "🔴 BEARISH",
@@ -347,7 +397,7 @@ def analyze_1h(symbol):
 
 
 # =========================================================
-# 15 MIN LIQUIDITY SWEEP
+# 15M LIQUIDITY SWEEP
 # =========================================================
 
 def analyze_15m(symbol):
@@ -361,8 +411,11 @@ def analyze_15m(symbol):
     if df.empty or len(df) < 10:
 
         return {
+
             "bull_sweep": False,
+
             "bear_sweep": False,
+
             "liquidity": "⚪ None"
         }
 
@@ -413,14 +466,20 @@ def analyze_15m(symbol):
         liquidity = "⚪ None"
 
     return {
-        "bull_sweep": bull_sweep,
-        "bear_sweep": bear_sweep,
-        "liquidity": liquidity
+
+        "bull_sweep":
+            bull_sweep,
+
+        "bear_sweep":
+            bear_sweep,
+
+        "liquidity":
+            liquidity
     }
 
 
 # =========================================================
-# 5 MIN STRUCTURE BREAK
+# 5M BOS
 # =========================================================
 
 def analyze_5m(symbol):
@@ -434,8 +493,11 @@ def analyze_5m(symbol):
     if df.empty or len(df) < 15:
 
         return {
+
             "bull_bos": False,
+
             "bear_bos": False,
+
             "structure": "⚪ None"
         }
 
@@ -476,9 +538,15 @@ def analyze_5m(symbol):
         structure_name = "⚪ None"
 
     return {
-        "bull_bos": bull_bos,
-        "bear_bos": bear_bos,
-        "structure": structure_name
+
+        "bull_bos":
+            bull_bos,
+
+        "bear_bos":
+            bear_bos,
+
+        "structure":
+            structure_name
     }
 
 
@@ -515,8 +583,10 @@ def analyze_volume(symbol):
         }
 
     return {
+
         "volume_ratio":
-            last_volume / avg_volume
+            last_volume /
+            avg_volume
     }
 
 
@@ -526,13 +596,18 @@ def analyze_volume(symbol):
 
 def analyze_oi(symbol):
 
-    df = get_oi_history(symbol)
+    df = get_oi_history(
+        symbol
+    )
 
     if df.empty or len(df) < 5:
 
         return {
+
             "oi_change": 0,
-            "oi_signal": "⚪ OI Unknown"
+
+            "oi_signal":
+                "⚪ OI Unknown"
         }
 
     now = float(
@@ -546,8 +621,11 @@ def analyze_oi(symbol):
     if old == 0:
 
         return {
+
             "oi_change": 0,
-            "oi_signal": "⚪ OI Unknown"
+
+            "oi_signal":
+                "⚪ OI Unknown"
         }
 
     change = (
@@ -557,19 +635,27 @@ def analyze_oi(symbol):
 
     if change <= -1:
 
-        signal = "🔻 OI DISPLACEMENT DOWN"
+        signal = (
+            "🔻 OI DISPLACEMENT DOWN"
+        )
 
     elif change >= 1:
 
-        signal = "🔺 OI DISPLACEMENT UP"
+        signal = (
+            "🔺 OI DISPLACEMENT UP"
+        )
 
     else:
 
         signal = "⚪ OI NEUTRAL"
 
     return {
-        "oi_change": change,
-        "oi_signal": signal
+
+        "oi_change":
+            change,
+
+        "oi_signal":
+            signal
     }
 
 
@@ -577,17 +663,78 @@ def analyze_oi(symbol):
 # DEEP ANALYSIS
 # =========================================================
 
-def deep_analysis(symbol, ticker):
+def deep_analysis(
+    symbol,
+    ticker
+):
 
-    trend = analyze_1h(symbol)
+    trend = analyze_1h(
+        symbol
+    )
 
-    sweep = analyze_15m(symbol)
+    sweep = analyze_15m(
+        symbol
+    )
 
-    bos = analyze_5m(symbol)
+    bos = analyze_5m(
+        symbol
+    )
 
-    volume = analyze_volume(symbol)
+    volume = analyze_volume(
+        symbol
+    )
 
-    oi = analyze_oi(symbol)
+    oi = analyze_oi(
+        symbol
+    )
+
+    # =====================================================
+    # FUNDING
+    # =====================================================
+
+    funding = ticker.get(
+        "Funding",
+        None
+    )
+
+    funding_available = (
+        funding is not None
+    )
+
+    if funding_available:
+
+        try:
+
+            funding = float(
+                funding
+            )
+
+            # Delta funding usually comes
+            # as decimal.
+            #
+            # Example:
+            # 0.0005 = 0.05%
+
+            funding_pct = (
+                funding * 100
+            )
+
+        except Exception:
+
+            funding_available = False
+
+            funding = None
+
+            funding_pct = None
+
+    else:
+
+        funding_pct = None
+
+
+    # =====================================================
+    # SCORES
+    # =====================================================
 
     long_score = 0
 
@@ -598,9 +745,9 @@ def deep_analysis(symbol, ticker):
     short_reason = []
 
 
-    # --------------------------------
+    # =====================================================
     # 1H TREND
-    # --------------------------------
+    # =====================================================
 
     if trend["trend"] == "🟢 BULLISH":
 
@@ -619,9 +766,9 @@ def deep_analysis(symbol, ticker):
         )
 
 
-    # --------------------------------
+    # =====================================================
     # 15M LIQUIDITY
-    # --------------------------------
+    # =====================================================
 
     if sweep["bull_sweep"]:
 
@@ -640,9 +787,9 @@ def deep_analysis(symbol, ticker):
         )
 
 
-    # --------------------------------
+    # =====================================================
     # 5M BOS
-    # --------------------------------
+    # =====================================================
 
     if bos["bull_bos"]:
 
@@ -661,15 +808,18 @@ def deep_analysis(symbol, ticker):
         )
 
 
-    # --------------------------------
+    # =====================================================
     # VOLUME
-    # --------------------------------
+    # =====================================================
 
-    vr = volume["volume_ratio"]
+    vr = volume[
+        "volume_ratio"
+    ]
 
     if vr >= 2:
 
         long_score += 2
+
         short_score += 2
 
         long_reason.append(
@@ -683,18 +833,22 @@ def deep_analysis(symbol, ticker):
     elif vr >= 1.3:
 
         long_score += 1
+
         short_score += 1
 
 
-    # --------------------------------
+    # =====================================================
     # OI
-    # --------------------------------
+    # =====================================================
 
-    oi_change = oi["oi_change"]
+    oi_change = oi[
+        "oi_change"
+    ]
 
     if oi_change <= -1:
 
         long_score += 2
+
         short_score += 2
 
         long_reason.append(
@@ -708,12 +862,68 @@ def deep_analysis(symbol, ticker):
     elif oi_change >= 1:
 
         long_score += 1
+
         short_score += 1
 
 
-    # =================================================
-    # SIGNAL
-    # =================================================
+    # =====================================================
+    # FUNDING
+    # =====================================================
+
+    funding_signal = (
+        "⚪ Funding unavailable"
+    )
+
+    if funding_available:
+
+        # -----------------------------------------------
+        # HIGH POSITIVE FUNDING
+        # -----------------------------------------------
+
+        if funding_pct >= 0.05:
+
+            # Longs crowded
+            # Contrarian short confirmation
+
+            short_score += 2
+
+            short_reason.append(
+                "High positive funding"
+            )
+
+            funding_signal = (
+                "🔴 Longs crowded"
+            )
+
+        # -----------------------------------------------
+        # HIGH NEGATIVE FUNDING
+        # -----------------------------------------------
+
+        elif funding_pct <= -0.05:
+
+            # Shorts crowded
+            # Contrarian long confirmation
+
+            long_score += 2
+
+            long_reason.append(
+                "High negative funding"
+            )
+
+            funding_signal = (
+                "🟢 Shorts crowded"
+            )
+
+        else:
+
+            funding_signal = (
+                "⚪ Funding neutral"
+            )
+
+
+    # =====================================================
+    # FINAL SIGNAL
+    # =====================================================
 
     if (
         long_score >= 8
@@ -776,12 +986,14 @@ def deep_analysis(symbol, ticker):
             short_score
         )
 
-        reason = "Conditions mixed"
+        reason = (
+            "Conditions mixed"
+        )
 
 
-    # =================================================
+    # =====================================================
     # ENTRY ZONE
-    # =================================================
+    # =====================================================
 
     entry_zone = "Wait"
 
@@ -801,10 +1013,6 @@ def deep_analysis(symbol, ticker):
 
         high = float(
             last["high"]
-        )
-
-        close = float(
-            last["close"]
         )
 
         if "LONG" in signal:
@@ -836,14 +1044,22 @@ def deep_analysis(symbol, ticker):
             )
 
 
+    # =====================================================
+    # RESULT
+    # =====================================================
+
     return {
 
-        "Coin": symbol,
+        "Coin":
+            symbol,
 
-        "Price": round(
-            float(ticker["Price"]),
-            8
-        ),
+        "Price":
+            round(
+                float(
+                    ticker["Price"]
+                ),
+                8
+            ),
 
         "1H Trend":
             trend["trend"],
@@ -855,13 +1071,32 @@ def deep_analysis(symbol, ticker):
             bos["structure"],
 
         "Volume Ratio":
-            round(vr, 2),
+            round(
+                vr,
+                2
+            ),
 
         "OI Change %":
-            round(oi_change, 2),
+            round(
+                oi_change,
+                2
+            ),
 
         "OI":
             oi["oi_signal"],
+
+        "Funding %":
+            (
+                round(
+                    funding_pct,
+                    4
+                )
+                if funding_pct is not None
+                else None
+            ),
+
+        "Funding":
+            funding_signal,
 
         "Score":
             score,
@@ -878,7 +1113,7 @@ def deep_analysis(symbol, ticker):
 
 
 # =========================================================
-# LOAD DATA
+# LOAD MARKET
 # =========================================================
 
 all_coins = get_all_perpetuals()
@@ -925,7 +1160,7 @@ market = market.sort_values(
 
 
 # =========================================================
-# HEADER
+# HEADER METRICS
 # =========================================================
 
 c1, c2, c3 = st.columns(3)
@@ -940,7 +1175,7 @@ with c1:
 with c2:
 
     st.metric(
-        "Coins with Market Data",
+        "Market Data",
         market["Price"].notna().sum()
     )
 
@@ -953,7 +1188,7 @@ with c3:
 
 
 # =========================================================
-# ALL 220 COINS
+# ALL COINS
 # =========================================================
 
 st.subheader(
@@ -961,58 +1196,71 @@ st.subheader(
 )
 
 st.dataframe(
+
     market[
         [
             "Coin",
             "Price",
             "24H Volume",
             "OI",
+            "Funding",
             "Vol/OI"
         ]
     ].head(250),
+
     use_container_width=True,
+
     hide_index=True
 )
 
 
 # =========================================================
-# LIGHTWEIGHT FILTER
+# CANDIDATE SELECTION
 # =========================================================
 
 st.subheader(
     "🔎 Candidate Selection"
 )
 
-# All coins are considered here.
-# Deep analysis is applied to the highest-activity
-# contracts to prevent API overload.
+candidate_market = (
+    market.copy()
+)
 
-candidate_market = market.copy()
-
-candidate_market["Activity"] = (
-    candidate_market["24H Volume"].rank(
+candidate_market[
+    "Activity"
+] = (
+    candidate_market[
+        "24H Volume"
+    ].rank(
         pct=True
     )
 )
 
-candidate_market = candidate_market.sort_values(
-    [
-        "Activity",
-        "Vol/OI"
-    ],
-    ascending=False
+candidate_market = (
+    candidate_market.sort_values(
+        [
+            "Activity",
+            "Vol/OI"
+        ],
+        ascending=False
+    )
 )
 
-candidates = candidate_market.head(
-    DEEP_SCAN_LIMIT
+candidates = (
+    candidate_market.head(
+        DEEP_SCAN_LIMIT
+    )
 )
 
 
 st.info(
-    f"All {len(market)} perpetuals considered. "
-    f"Deep multi-timeframe analysis is being applied "
-    f"to the top {len(candidates)} active candidates "
-    f"to control API load."
+
+    f"All {len(market)} live "
+    f"perpetuals list mein considered hain. "
+    f"API load control ke liye deep "
+    f"multi-timeframe analysis top "
+    f"{len(candidates)} active coins par "
+    f"kiya ja raha hai."
 )
 
 
@@ -1021,12 +1269,18 @@ st.info(
 # =========================================================
 
 st.subheader(
-    "🎯 Multi-Timeframe Reversal Scanner"
+    "🎯 Multi-Timeframe Scanner"
 )
 
 results = []
 
-progress = st.progress(0)
+progress = st.progress(
+    0
+)
+
+candidate_count = len(
+    candidates
+)
 
 for i, (_, row) in enumerate(
     candidates.iterrows()
@@ -1039,12 +1293,18 @@ for i, (_, row) in enumerate(
 
     if result:
 
-        results.append(result)
+        results.append(
+            result
+        )
 
     progress.progress(
         int(
-            ((i + 1) /
-             len(candidates)) * 100
+            (
+                (i + 1)
+                /
+                candidate_count
+            )
+            * 100
         )
     )
 
@@ -1063,7 +1323,8 @@ signals = pd.DataFrame(
 if signals.empty:
 
     st.warning(
-        "Abhi deep-analysis data available nahi hai."
+        "Abhi deep-analysis data "
+        "available nahi hai."
     )
 
 else:
@@ -1085,7 +1346,7 @@ else:
 # =========================================================
 
 st.subheader(
-    "🔥 Strong Reversal Signals"
+    "🔥 Strong Signals — Score 8+"
 )
 
 if not signals.empty:
@@ -1110,7 +1371,7 @@ if not signals.empty:
 
 
 # =========================================================
-# LONG / SHORT
+# LONG / SHORT WATCH
 # =========================================================
 
 st.subheader(
@@ -1135,7 +1396,9 @@ if not signals.empty:
 
     with col1:
 
-        st.write("🟢 LONG")
+        st.write(
+            "🟢 LONG"
+        )
 
         st.dataframe(
             long_watch,
@@ -1145,7 +1408,9 @@ if not signals.empty:
 
     with col2:
 
-        st.write("🔴 SHORT")
+        st.write(
+            "🔴 SHORT"
+        )
 
         st.dataframe(
             short_watch,
@@ -1155,48 +1420,74 @@ if not signals.empty:
 
 
 # =========================================================
-# STRATEGY
+# STRATEGY EXPLANATION
 # =========================================================
 
 st.divider()
 
 st.subheader(
-    "🧠 Scanner Strategy"
+    "🧠 Scanner Logic"
 )
 
 st.write(
     """
-1️⃣ 220 live perpetual contracts
+1️⃣ 220 तक live perpetual contracts
 
-2️⃣ 1H trend:
-Bullish / Bearish / Neutral
+2️⃣ 1H trend
 
-3️⃣ 15m:
-Liquidity sweep
+3️⃣ 15m liquidity sweep
 
-4️⃣ 5m:
-Break of Structure (BOS)
+4️⃣ 5m Break of Structure (BOS)
 
-5️⃣ OI:
-Displacement up/down
+5️⃣ 5m volume expansion
 
-6️⃣ Volume:
-Volume expansion confirmation
+6️⃣ OI displacement
 
-7️⃣ Score:
-Multiple confirmations ko combine karke
-LONG / SHORT WATCH generate hota hai.
+7️⃣ Funding crowding
 
-8️⃣ Entry Zone:
-5m candle ke basis par possible zone dikhaya jata hai.
+8️⃣ सभी confirmations से score
+
+9️⃣ Score 8+ = Strong Signal
+
+🔟 उसके बाद possible Entry Zone
 """
 )
 
+
+# =========================================================
+# FUNDING EXPLANATION
+# =========================================================
+
+st.subheader(
+    "💰 Funding Logic"
+)
+
+st.write(
+    """
+🔴 Positive Funding बहुत ज्यादा:
+Longs crowded → Short को +2
+
+🟢 Negative Funding बहुत ज्यादा:
+Shorts crowded → Long को +2
+
+⚪ Funding normal:
+कोई extra score नहीं
+
+Funding अकेले trade signal नहीं है।
+इसे liquidity sweep + BOS + OI + volume
+के साथ confirmation के रूप में इस्तेमाल किया गया है।
+"""
+)
+
+
+# =========================================================
+# IMPORTANT NOTE
+# =========================================================
+
 st.warning(
-    "⚠️ Entry Zone guaranteed entry nahi hai. "
-    "Ye scanner research/confirmation tool hai. "
-    "Real trade se pehle stop-loss aur risk management "
-    "zaroor use karein."
+    "⚠️ यह scanner trading signal की guarantee "
+    "नहीं देता। Entry से पहले price action, "
+    "risk और stop-loss की पुष्टि करें."
 )
 
 
