@@ -2,27 +2,37 @@ import streamlit as st
 import requests
 import pandas as pd
 import time
+import numpy as np
 
 BASE_URL = "https://api.india.delta.exchange"
 
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Delta-Reversal-Scanner/5.0"
+    "User-Agent": "Delta-Reversal-Scanner/6.0"
 }
 
 CACHE_SECONDS = 120
+
+# Server load ko control karne ke liye
 DEEP_SCAN_LIMIT = 30
 
+# OI history
+OI_HISTORY_HOURS = 6
+
+# ATR settings
+ATR_PERIOD = 14
+ATR_COMPARE_PERIODS = 5
+
 st.set_page_config(
-    page_title="Delta Reversal Scanner",
+    page_title="Delta Advanced Scanner",
     layout="wide"
 )
 
-st.title("🔥 Delta Reversal Scanner")
+st.title("🔥 Delta Advanced Reversal Scanner")
 
 st.caption(
-    "1H Trend → 15m Liquidity Sweep → "
-    "5m BOS → OI → Funding → Volume → Score"
+    "1H Trend → 15m Liquidity → 5m BOS → "
+    "MTF Confirmation → OI → Volume → ATR → Funding → Score"
 )
 
 
@@ -33,6 +43,7 @@ st.caption(
 def api_get(path, params=None):
 
     try:
+
         response = requests.get(
             BASE_URL + path,
             params=params,
@@ -51,6 +62,7 @@ def api_get(path, params=None):
         return data.get("result", [])
 
     except Exception:
+
         return None
 
 
@@ -84,12 +96,37 @@ def get_all_perpetuals():
         if not symbol:
             continue
 
+        # -------------------------------------------------
+        # LEVERAGE
+        # -------------------------------------------------
+
+        max_leverage = (
+            p.get("max_leverage")
+            or p.get("max_leverage_ratio")
+            or p.get("leverage")
+        )
+
+        try:
+
+            if max_leverage is not None:
+                max_leverage = float(max_leverage)
+
+        except Exception:
+
+            max_leverage = None
+
         rows.append({
+
             "Coin": symbol,
+
             "ID": p.get("id"),
+
             "Underlying": p.get(
                 "underlying_asset", {}
-            ).get("symbol", "")
+            ).get("symbol", ""),
+
+            "Max Leverage": max_leverage
+
         })
 
     df = pd.DataFrame(rows)
@@ -147,14 +184,15 @@ def get_tickers():
             )
 
         except Exception:
+
             continue
 
         if price <= 0:
             continue
 
-        # -------------------------------
+        # -------------------------------------------------
         # FUNDING
-        # -------------------------------
+        # -------------------------------------------------
 
         funding_raw = p.get(
             "funding_rate",
@@ -174,11 +212,17 @@ def get_tickers():
             funding = None
 
         rows.append({
+
             "Coin": symbol,
+
             "Price": price,
+
             "24H Volume": volume,
+
             "OI": oi,
+
             "Funding": funding
+
         })
 
     df = pd.DataFrame(rows)
@@ -188,7 +232,7 @@ def get_tickers():
 
     df["Vol/OI"] = (
         df["24H Volume"] /
-        df["OI"].replace(0, pd.NA)
+        df["OI"].replace(0, np.nan)
     )
 
     return df
@@ -245,7 +289,7 @@ def get_candles(symbol, resolution, hours):
             "low",
             "close"
         ]
-    ).sort_values("time")
+    ).sort_values("time").reset_index(drop=True)
 
 
 # =========================================================
@@ -257,7 +301,10 @@ def get_oi_history(symbol):
 
     end = int(time.time())
 
-    start = end - 6 * 60 * 60
+    start = (
+        end -
+        OI_HISTORY_HOURS * 60 * 60
+    )
 
     result = api_get(
         "/v2/history/candles",
@@ -286,26 +333,18 @@ def get_oi_history(symbol):
 
     return df.dropna(
         subset=["close"]
-    ).sort_values("time")
+    ).sort_values("time").reset_index(drop=True)
 
 
 # =========================================================
-# 1H TREND
+# GENERIC TREND
 # =========================================================
 
-def analyze_1h(symbol):
-
-    df = get_candles(
-        symbol,
-        "1h",
-        72
-    )
+def timeframe_trend(df):
 
     if df.empty or len(df) < 20:
 
-        return {
-            "trend": "⚪ UNKNOWN"
-        }
+        return "⚪ UNKNOWN"
 
     close = df["close"]
 
@@ -331,25 +370,48 @@ def analyze_1h(symbol):
         ema21.iloc[-1]
     )
 
+    # Strong directional
     if fast > slow and price > fast:
 
-        return {
-            "trend": "🟢 BULLISH"
-        }
+        return "🟢 BULLISH"
 
     if fast < slow and price < fast:
 
-        return {
-            "trend": "🔴 BEARISH"
-        }
+        return "🔴 BEARISH"
+
+    # EMA distance very small = range
+    ema_distance = (
+        abs(fast - slow)
+        / max(abs(slow), 1e-9)
+    ) * 100
+
+    if ema_distance < 0.15:
+
+        return "⚪ RANGE"
+
+    return "🟡 UNCERTAIN"
+
+
+# =========================================================
+# 1H TREND
+# =========================================================
+
+def analyze_1h(symbol):
+
+    df = get_candles(
+        symbol,
+        "1h",
+        72
+    )
 
     return {
-        "trend": "⚪ NEUTRAL"
+        "trend":
+            timeframe_trend(df)
     }
 
 
 # =========================================================
-# 15M LIQUIDITY SWEEP
+# 15M TREND + LIQUIDITY
 # =========================================================
 
 def analyze_15m(symbol):
@@ -360,13 +422,21 @@ def analyze_15m(symbol):
         24
     )
 
-    if df.empty or len(df) < 10:
+    if df.empty or len(df) < 20:
 
         return {
+
             "bull_sweep": False,
+
             "bear_sweep": False,
-            "liquidity": "⚪ None"
+
+            "liquidity": "⚪ None",
+
+            "trend": "⚪ UNKNOWN"
+
         }
+
+    trend = timeframe_trend(df)
 
     last = df.iloc[-1]
 
@@ -381,55 +451,75 @@ def analyze_15m(symbol):
     )
 
     bull_sweep = (
+
         float(last["low"]) < previous_low
+
         and
+
         float(last["close"]) > previous_low
+
     )
 
     bear_sweep = (
+
         float(last["high"]) > previous_high
+
         and
+
         float(last["close"]) < previous_high
+
     )
 
     if bull_sweep:
 
-        name = "🟢 BULL SWEEP"
+        liquidity = "🟢 BULL SWEEP"
 
     elif bear_sweep:
 
-        name = "🔴 BEAR SWEEP"
+        liquidity = "🔴 BEAR SWEEP"
 
     else:
 
-        name = "⚪ None"
+        liquidity = "⚪ None"
 
     return {
-        "bull_sweep": bull_sweep,
-        "bear_sweep": bear_sweep,
-        "liquidity": name
+
+        "bull_sweep":
+            bull_sweep,
+
+        "bear_sweep":
+            bear_sweep,
+
+        "liquidity":
+            liquidity,
+
+        "trend":
+            trend
+
     }
 
 
 # =========================================================
-# 5M BOS
+# 5M BOS + TREND
 # =========================================================
 
-def analyze_5m(symbol):
+def analyze_5m(df):
 
-    df = get_candles(
-        symbol,
-        "5m",
-        12
-    )
-
-    if df.empty or len(df) < 15:
+    if df.empty or len(df) < 20:
 
         return {
+
             "bull_bos": False,
+
             "bear_bos": False,
-            "structure": "⚪ None"
+
+            "structure": "⚪ None",
+
+            "trend": "⚪ UNKNOWN"
+
         }
+
+    trend = timeframe_trend(df)
 
     last = df.iloc[-1]
 
@@ -447,26 +537,329 @@ def analyze_5m(symbol):
         last["close"]
     )
 
-    bull_bos = close > previous_high
+    bull_bos = (
+        close > previous_high
+    )
 
-    bear_bos = close < previous_low
+    bear_bos = (
+        close < previous_low
+    )
 
     if bull_bos:
 
-        name = "🟢 BULL BOS"
+        structure = "🟢 BULL BOS"
 
     elif bear_bos:
 
-        name = "🔴 BEAR BOS"
+        structure = "🔴 BEAR BOS"
 
     else:
 
-        name = "⚪ None"
+        structure = "⚪ None"
 
     return {
-        "bull_bos": bull_bos,
-        "bear_bos": bear_bos,
-        "structure": name
+
+        "bull_bos":
+            bull_bos,
+
+        "bear_bos":
+            bear_bos,
+
+        "structure":
+            structure,
+
+        "trend":
+            trend
+
+    }
+
+
+# =========================================================
+# MULTI TIMEFRAME
+# =========================================================
+
+def analyze_mtf(
+    trend_1h,
+    trend_15m,
+    trend_5m
+):
+
+    trends = [
+        trend_1h,
+        trend_15m,
+        trend_5m
+    ]
+
+    bullish = trends.count(
+        "🟢 BULLISH"
+    )
+
+    bearish = trends.count(
+        "🔴 BEARISH"
+    )
+
+    ranges = trends.count(
+        "⚪ RANGE"
+    )
+
+    unknown = trends.count(
+        "⚪ UNKNOWN"
+    )
+
+    uncertain = trends.count(
+        "🟡 UNCERTAIN"
+    )
+
+    # -----------------------------------------------------
+    # DIRECTIONAL UP
+    # -----------------------------------------------------
+
+    if bullish >= 2 and bearish == 0:
+
+        state = "🟢 DIRECTIONAL UP"
+
+        long_points = 2
+
+        short_points = 0
+
+    # -----------------------------------------------------
+    # DIRECTIONAL DOWN
+    # -----------------------------------------------------
+
+    elif bearish >= 2 and bullish == 0:
+
+        state = "🔴 DIRECTIONAL DOWN"
+
+        long_points = 0
+
+        short_points = 2
+
+    # -----------------------------------------------------
+    # RANGE
+    # -----------------------------------------------------
+
+    elif ranges >= 2:
+
+        state = "⚪ RANGE BOUND"
+
+        long_points = 0
+
+        short_points = 0
+
+    # -----------------------------------------------------
+    # UNCERTAINTY
+    # -----------------------------------------------------
+
+    else:
+
+        state = "🟡 UNCERTAINTY"
+
+        long_points = 0
+
+        short_points = 0
+
+    return {
+
+        "state":
+            state,
+
+        "long_points":
+            long_points,
+
+        "short_points":
+            short_points,
+
+        "confirmation":
+            f"1H {trend_1h} | "
+            f"15m {trend_15m} | "
+            f"5m {trend_5m}"
+
+    }
+
+
+# =========================================================
+# ATR
+# =========================================================
+
+def calculate_atr(df, period=14):
+
+    if df.empty or len(df) < period + 2:
+
+        return pd.Series(
+            dtype=float
+        )
+
+    high = df["high"]
+
+    low = df["low"]
+
+    close = df["close"]
+
+    previous_close = close.shift(1)
+
+    tr1 = high - low
+
+    tr2 = (
+        high -
+        previous_close
+    ).abs()
+
+    tr3 = (
+        low -
+        previous_close
+    ).abs()
+
+    true_range = pd.concat(
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
+        axis=1
+    ).max(axis=1)
+
+    atr = true_range.rolling(
+        period
+    ).mean()
+
+    return atr
+
+
+# =========================================================
+# ATR ANALYSIS
+# =========================================================
+
+def analyze_atr(df):
+
+    if df.empty or len(df) < 30:
+
+        return {
+
+            "atr": None,
+
+            "atr_average": None,
+
+            "atr_change": None,
+
+            "atr_signal":
+                "⚪ ATR Unknown",
+
+            "atr_state":
+                "Unknown"
+
+        }
+
+    atr_series = calculate_atr(
+        df,
+        ATR_PERIOD
+    )
+
+    atr_series = atr_series.dropna()
+
+    if len(atr_series) < (
+        ATR_COMPARE_PERIODS * 2
+    ):
+
+        return {
+
+            "atr": None,
+
+            "atr_average": None,
+
+            "atr_change": None,
+
+            "atr_signal":
+                "⚪ ATR Unknown",
+
+            "atr_state":
+                "Unknown"
+
+        }
+
+    current_atr = float(
+        atr_series.iloc[-1]
+    )
+
+    previous_atr_average = float(
+        atr_series.iloc[
+            -(
+                ATR_COMPARE_PERIODS + 1
+            ):
+            -1
+        ].mean()
+    )
+
+    if previous_atr_average <= 0:
+
+        return {
+
+            "atr": current_atr,
+
+            "atr_average":
+                previous_atr_average,
+
+            "atr_change": None,
+
+            "atr_signal":
+                "⚪ ATR Neutral",
+
+            "atr_state":
+                "Neutral"
+
+        }
+
+    change = (
+        (
+            current_atr -
+            previous_atr_average
+        )
+        /
+        previous_atr_average
+    ) * 100
+
+    # -----------------------------------------------------
+    # Expansion
+    # -----------------------------------------------------
+
+    if change >= 5:
+
+        signal = "🔥 ATR EXPANDING"
+
+        state = "EXPANSION"
+
+    # -----------------------------------------------------
+    # Compression
+    # -----------------------------------------------------
+
+    elif change <= -5:
+
+        signal = "🧊 ATR CONTRACTING"
+
+        state = "COMPRESSION"
+
+    else:
+
+        signal = "⚪ ATR STABLE"
+
+        state = "STABLE"
+
+    return {
+
+        "atr":
+            current_atr,
+
+        "atr_average":
+            previous_atr_average,
+
+        "atr_change":
+            change,
+
+        "atr_signal":
+            signal,
+
+        "atr_state":
+            state
+
     }
 
 
@@ -474,18 +867,23 @@ def analyze_5m(symbol):
 # VOLUME
 # =========================================================
 
-def analyze_volume(symbol):
+def analyze_volume(df):
 
-    df = get_candles(
-        symbol,
-        "5m",
-        8
-    )
-
-    if df.empty or len(df) < 6:
+    if df.empty or len(df) < 10:
 
         return {
-            "volume_ratio": 0
+
+            "volume_ratio": 0,
+
+            "volume_signal":
+                "⚪ Volume Unknown",
+
+            "current_volume":
+                0,
+
+            "average_volume":
+                0
+
         }
 
     current_volume = float(
@@ -499,13 +897,55 @@ def analyze_volume(symbol):
     if average_volume <= 0:
 
         return {
-            "volume_ratio": 0
+
+            "volume_ratio": 0,
+
+            "volume_signal":
+                "⚪ Volume Unknown",
+
+            "current_volume":
+                current_volume,
+
+            "average_volume":
+                average_volume
+
         }
 
+    ratio = (
+        current_volume /
+        average_volume
+    )
+
+    if ratio >= 2:
+
+        signal = "🔥 VOLUME SPIKE"
+
+    elif ratio >= 1.3:
+
+        signal = "🟢 VOLUME HIGH"
+
+    elif ratio <= 0.7:
+
+        signal = "🧊 VOLUME LOW"
+
+    else:
+
+        signal = "⚪ VOLUME NORMAL"
+
     return {
+
         "volume_ratio":
-            current_volume /
+            ratio,
+
+        "volume_signal":
+            signal,
+
+        "current_volume":
+            current_volume,
+
+        "average_volume":
             average_volume
+
     }
 
 
@@ -515,17 +955,37 @@ def analyze_volume(symbol):
 
 def analyze_oi(symbol):
 
-    df = get_oi_history(symbol)
+    df = get_oi_history(
+        symbol
+    )
 
     if df.empty or len(df) < 5:
 
         return {
-            "oi_change": None,
-            "oi_signal": "⚪ Unknown"
+
+            "oi_current":
+                None,
+
+            "oi_average":
+                None,
+
+            "oi_change":
+                None,
+
+            "oi_ratio":
+                None,
+
+            "oi_signal":
+                "⚪ OI Unknown"
+
         }
 
     current = float(
         df["close"].iloc[-1]
+    )
+
+    average = float(
+        df["close"].iloc[:-1].mean()
     )
 
     previous = float(
@@ -534,17 +994,35 @@ def analyze_oi(symbol):
 
     if previous == 0:
 
-        return {
-            "oi_change": None,
-            "oi_signal": "⚪ Unknown"
-        }
+        change = None
 
-    change = (
-        (current - previous)
-        / abs(previous)
-    ) * 100
+    else:
 
-    if change >= 1:
+        change = (
+            (
+                current -
+                previous
+            )
+            /
+            abs(previous)
+        ) * 100
+
+    if average > 0:
+
+        ratio = (
+            current /
+            average
+        )
+
+    else:
+
+        ratio = None
+
+    if change is None:
+
+        signal = "⚪ OI Unknown"
+
+    elif change >= 1:
 
         signal = "🔺 OI UP"
 
@@ -557,31 +1035,332 @@ def analyze_oi(symbol):
         signal = "⚪ OI NEUTRAL"
 
     return {
-        "oi_change": change,
-        "oi_signal": signal
+
+        "oi_current":
+            current,
+
+        "oi_average":
+            average,
+
+        "oi_change":
+            change,
+
+        "oi_ratio":
+            ratio,
+
+        "oi_signal":
+            signal
+
     }
+
+
+# =========================================================
+# LEVERAGE CATEGORY
+# =========================================================
+
+def leverage_category(max_leverage):
+
+    if max_leverage is None:
+
+        return (
+            "⚪ Unknown",
+            "Unknown"
+        )
+
+    try:
+
+        lev = float(
+            max_leverage
+        )
+
+    except Exception:
+
+        return (
+            "⚪ Unknown",
+            "Unknown"
+        )
+
+    # 20x specifically
+    if lev >= 20 and lev < 50:
+
+        return (
+            "20x+",
+            "20x"
+        )
+
+    # 50x - 200x
+    if lev >= 50 and lev <= 200:
+
+        return (
+            "50x–200x",
+            "50x–200x"
+        )
+
+    # Above 200x
+    if lev > 200:
+
+        return (
+            f"{lev:.0f}x+",
+            "200x+"
+        )
+
+    return (
+        f"{lev:.0f}x max",
+        "<20x"
+    )
 
 
 # =========================================================
 # DEEP ANALYSIS
 # =========================================================
 
-def deep_analysis(symbol, ticker):
+def deep_analysis(
+    symbol,
+    ticker,
+    max_leverage,
+    market_avg_volume,
+    market_avg_oi
+):
 
-    trend = analyze_1h(symbol)
+    # -----------------------------------------------------
+    # TIMEFRAMES
+    # -----------------------------------------------------
 
-    sweep = analyze_15m(symbol)
+    df_1h = get_candles(
+        symbol,
+        "1h",
+        72
+    )
 
-    bos = analyze_5m(symbol)
+    df_15m = get_candles(
+        symbol,
+        "15m",
+        24
+    )
 
-    volume = analyze_volume(symbol)
+    # 5m ko ek baar fetch kar rahe hain
+    df_5m = get_candles(
+        symbol,
+        "5m",
+        12
+    )
 
-    oi = analyze_oi(symbol)
+    # -----------------------------------------------------
+    # TREND
+    # -----------------------------------------------------
 
+    trend_1h = timeframe_trend(
+        df_1h
+    )
 
-    # =====================================================
+    trend_15m = timeframe_trend(
+        df_15m
+    )
+
+    bos = analyze_5m(
+        df_5m
+    )
+
+    trend_5m = bos[
+        "trend"
+    ]
+
+    # -----------------------------------------------------
+    # LIQUIDITY
+    # -----------------------------------------------------
+
+    if df_15m.empty or len(df_15m) < 10:
+
+        sweep = {
+
+            "bull_sweep": False,
+
+            "bear_sweep": False,
+
+            "liquidity": "⚪ None"
+
+        }
+
+    else:
+
+        last = df_15m.iloc[-1]
+
+        previous = df_15m.iloc[-7:-1]
+
+        previous_high = float(
+            previous["high"].max()
+        )
+
+        previous_low = float(
+            previous["low"].min()
+        )
+
+        bull_sweep = (
+
+            float(last["low"])
+            < previous_low
+
+            and
+
+            float(last["close"])
+            > previous_low
+
+        )
+
+        bear_sweep = (
+
+            float(last["high"])
+            > previous_high
+
+            and
+
+            float(last["close"])
+            < previous_high
+
+        )
+
+        if bull_sweep:
+
+            liquidity_name = (
+                "🟢 BULL SWEEP"
+            )
+
+        elif bear_sweep:
+
+            liquidity_name = (
+                "🔴 BEAR SWEEP"
+            )
+
+        else:
+
+            liquidity_name = (
+                "⚪ None"
+            )
+
+        sweep = {
+
+            "bull_sweep":
+                bull_sweep,
+
+            "bear_sweep":
+                bear_sweep,
+
+            "liquidity":
+                liquidity_name
+
+        }
+
+    # -----------------------------------------------------
+    # MTF
+    # -----------------------------------------------------
+
+    mtf = analyze_mtf(
+        trend_1h,
+        trend_15m,
+        trend_5m
+    )
+
+    # -----------------------------------------------------
+    # VOLUME
+    # -----------------------------------------------------
+
+    volume = analyze_volume(
+        df_5m
+    )
+
+    volume_ratio = volume[
+        "volume_ratio"
+    ]
+
+    current_volume = volume[
+        "current_volume"
+    ]
+
+    average_volume = volume[
+        "average_volume"
+    ]
+
+    # -----------------------------------------------------
+    # OI
+    # -----------------------------------------------------
+
+    oi = analyze_oi(
+        symbol
+    )
+
+    oi_current = oi[
+        "oi_current"
+    ]
+
+    oi_average = oi[
+        "oi_average"
+    ]
+
+    oi_change = oi[
+        "oi_change"
+    ]
+
+    oi_ratio = oi[
+        "oi_ratio"
+    ]
+
+    # -----------------------------------------------------
+    # ATR
+    # -----------------------------------------------------
+
+    atr = analyze_atr(
+        df_5m
+    )
+
+    atr_current = atr[
+        "atr"
+    ]
+
+    atr_average = atr[
+        "atr_average"
+    ]
+
+    atr_change = atr[
+        "atr_change"
+    ]
+
+    atr_signal = atr[
+        "atr_signal"
+    ]
+
+    # -----------------------------------------------------
+    # MARKET AVERAGES
+    # -----------------------------------------------------
+
+    if market_avg_volume > 0:
+
+        market_volume_ratio = (
+            current_volume /
+            market_avg_volume
+        )
+
+    else:
+
+        market_volume_ratio = None
+
+    if (
+        oi_current is not None
+        and
+        market_avg_oi > 0
+    ):
+
+        market_oi_ratio = (
+            oi_current /
+            market_avg_oi
+        )
+
+    else:
+
+        market_oi_ratio = None
+
+    # -----------------------------------------------------
     # FUNDING
-    # =====================================================
+    # -----------------------------------------------------
 
     funding = ticker.get(
         "Funding",
@@ -592,7 +1371,9 @@ def deep_analysis(symbol, ticker):
 
         try:
 
-            funding = float(funding)
+            funding = float(
+                funding
+            )
 
             funding_pct = (
                 funding * 100
@@ -600,30 +1381,29 @@ def deep_analysis(symbol, ticker):
 
         except Exception:
 
-            funding = None
             funding_pct = None
 
     else:
 
         funding_pct = None
 
-
-    # =====================================================
-    # SEPARATE LONG / SHORT SCORES
-    # =====================================================
+    # -----------------------------------------------------
+    # SCORES
+    # -----------------------------------------------------
 
     long_score = 0
+
     short_score = 0
 
     long_reason = []
+
     short_reason = []
 
-
     # =====================================================
-    # 1H TREND
+    # 1H
     # =====================================================
 
-    if trend["trend"] == "🟢 BULLISH":
+    if trend_1h == "🟢 BULLISH":
 
         long_score += 2
 
@@ -631,7 +1411,7 @@ def deep_analysis(symbol, ticker):
             "1H bullish"
         )
 
-    elif trend["trend"] == "🔴 BEARISH":
+    elif trend_1h == "🔴 BEARISH":
 
         short_score += 2
 
@@ -639,6 +1419,29 @@ def deep_analysis(symbol, ticker):
             "1H bearish"
         )
 
+    # =====================================================
+    # MTF
+    # =====================================================
+
+    if mtf["long_points"]:
+
+        long_score += (
+            mtf["long_points"]
+        )
+
+        long_reason.append(
+            "MTF directional up"
+        )
+
+    if mtf["short_points"]:
+
+        short_score += (
+            mtf["short_points"]
+        )
+
+        short_reason.append(
+            "MTF directional down"
+        )
 
     # =====================================================
     # LIQUIDITY
@@ -660,7 +1463,6 @@ def deep_analysis(symbol, ticker):
             "15m bear sweep"
         )
 
-
     # =====================================================
     # BOS
     # =====================================================
@@ -681,51 +1483,61 @@ def deep_analysis(symbol, ticker):
             "5m bear BOS"
         )
 
-
     # =====================================================
     # VOLUME
     # =====================================================
 
-    volume_ratio = volume[
-        "volume_ratio"
-    ]
-
     if volume_ratio >= 2:
 
         long_score += 2
+
         short_score += 2
 
         long_reason.append(
-            "Volume spike"
+            "5m volume spike"
         )
 
         short_reason.append(
-            "Volume spike"
+            "5m volume spike"
         )
 
     elif volume_ratio >= 1.3:
 
         long_score += 1
+
         short_score += 1
 
+    # =====================================================
+    # MARKET VOLUME AVERAGE
+    # =====================================================
+
+    if (
+        market_volume_ratio is not None
+        and
+        market_volume_ratio >= 2
+    ):
+
+        long_score += 1
+
+        short_score += 1
+
+        long_reason.append(
+            "Volume > market average"
+        )
+
+        short_reason.append(
+            "Volume > market average"
+        )
 
     # =====================================================
     # OI
     # =====================================================
 
-    oi_change = oi[
-        "oi_change"
-    ]
-
     if oi_change is not None:
 
         if oi_change >= 1:
 
-            # OI increasing is confirmation
-            # for the direction already supported
-            # by structure.
-
-            if trend["trend"] == "🟢 BULLISH":
+            if trend_1h == "🟢 BULLISH":
 
                 long_score += 1
 
@@ -733,7 +1545,7 @@ def deep_analysis(symbol, ticker):
                     "OI increasing"
                 )
 
-            if trend["trend"] == "🔴 BEARISH":
+            elif trend_1h == "🔴 BEARISH":
 
                 short_score += 1
 
@@ -743,15 +1555,12 @@ def deep_analysis(symbol, ticker):
 
         elif oi_change <= -1:
 
-            # OI falling = possible position closing.
-            # Give only a small contextual point.
-
             if sweep["bull_sweep"]:
 
                 long_score += 1
 
                 long_reason.append(
-                    "OI falling after sweep"
+                    "OI falling after bull sweep"
                 )
 
             if sweep["bear_sweep"]:
@@ -759,9 +1568,82 @@ def deep_analysis(symbol, ticker):
                 short_score += 1
 
                 short_reason.append(
-                    "OI falling after sweep"
+                    "OI falling after bear sweep"
                 )
 
+    # =====================================================
+    # OI ABOVE MARKET AVERAGE
+    # =====================================================
+
+    if (
+        market_oi_ratio is not None
+        and
+        market_oi_ratio >= 1.5
+    ):
+
+        if trend_1h == "🟢 BULLISH":
+
+            long_score += 1
+
+            long_reason.append(
+                "OI > market average"
+            )
+
+        elif trend_1h == "🔴 BEARISH":
+
+            short_score += 1
+
+            short_reason.append(
+                "OI > market average"
+            )
+
+    # =====================================================
+    # ATR
+    # =====================================================
+
+    if atr_change is not None:
+
+        # Expansion
+        if atr_change >= 5:
+
+            if (
+                mtf["state"]
+                ==
+                "🟢 DIRECTIONAL UP"
+            ):
+
+                long_score += 1
+
+                long_reason.append(
+                    "ATR expanding + bullish"
+                )
+
+            elif (
+                mtf["state"]
+                ==
+                "🔴 DIRECTIONAL DOWN"
+            ):
+
+                short_score += 1
+
+                short_reason.append(
+                    "ATR expanding + bearish"
+                )
+
+            else:
+
+                # Expansion without direction
+                # gets no directional point.
+                pass
+
+        # Compression
+        elif atr_change <= -5:
+
+            # Compression means range/
+            # reduced volatility.
+            # No directional score.
+
+            pass
 
     # =====================================================
     # FUNDING
@@ -775,10 +1657,7 @@ def deep_analysis(symbol, ticker):
 
     else:
 
-        # -------------------------------------------------
-        # POSITIVE FUNDING
-        # -------------------------------------------------
-
+        # Positive funding
         if funding_pct >= 0.05:
 
             short_score += 2
@@ -791,10 +1670,7 @@ def deep_analysis(symbol, ticker):
                 "🔴 Longs crowded"
             )
 
-        # -------------------------------------------------
-        # NEGATIVE FUNDING
-        # -------------------------------------------------
-
+        # Negative funding
         elif funding_pct <= -0.05:
 
             long_score += 2
@@ -813,6 +1689,34 @@ def deep_analysis(symbol, ticker):
                 "⚪ Funding neutral"
             )
 
+    # =====================================================
+    # RANGE PENALTY
+    # =====================================================
+
+    if mtf["state"] == "⚪ RANGE BOUND":
+
+        # Range-bound market me
+        # strong directional score ko
+        # artificially strong nahi hone dena.
+
+        long_score = max(
+            0,
+            long_score - 1
+        )
+
+        short_score = max(
+            0,
+            short_score - 1
+        )
+
+    # =====================================================
+    # UNCERTAINTY
+    # =====================================================
+
+    if mtf["state"] == "🟡 UNCERTAINTY":
+
+        # No bonus
+        pass
 
     # =====================================================
     # LONG SIGNAL
@@ -836,7 +1740,6 @@ def deep_analysis(symbol, ticker):
             "⚪ NO LONG"
         )
 
-
     # =====================================================
     # SHORT SIGNAL
     # =====================================================
@@ -859,9 +1762,8 @@ def deep_analysis(symbol, ticker):
             "⚪ NO SHORT"
         )
 
-
     # =====================================================
-    # DOMINANT SIGNAL
+    # DOMINANT
     # =====================================================
 
     if (
@@ -870,9 +1772,13 @@ def deep_analysis(symbol, ticker):
         long_score > short_score
     ):
 
-        signal = "🟢 STRONG LONG"
+        signal = (
+            "🟢 STRONG LONG"
+        )
 
-        dominant_score = long_score
+        dominant_score = (
+            long_score
+        )
 
         dominant_reason = (
             " + ".join(
@@ -886,9 +1792,13 @@ def deep_analysis(symbol, ticker):
         short_score > long_score
     ):
 
-        signal = "🔴 STRONG SHORT"
+        signal = (
+            "🔴 STRONG SHORT"
+        )
 
-        dominant_score = short_score
+        dominant_score = (
+            short_score
+        )
 
         dominant_reason = (
             " + ".join(
@@ -902,9 +1812,13 @@ def deep_analysis(symbol, ticker):
         long_score > short_score
     ):
 
-        signal = "🟡 LONG WATCH"
+        signal = (
+            "🟡 LONG WATCH"
+        )
 
-        dominant_score = long_score
+        dominant_score = (
+            long_score
+        )
 
         dominant_reason = (
             " + ".join(
@@ -918,9 +1832,13 @@ def deep_analysis(symbol, ticker):
         short_score > long_score
     ):
 
-        signal = "🟠 SHORT WATCH"
+        signal = (
+            "🟠 SHORT WATCH"
+        )
 
-        dominant_score = short_score
+        dominant_score = (
+            short_score
+        )
 
         dominant_reason = (
             " + ".join(
@@ -930,7 +1848,9 @@ def deep_analysis(symbol, ticker):
 
     else:
 
-        signal = "⚪ NO SIGNAL"
+        signal = (
+            "⚪ NO SIGNAL"
+        )
 
         dominant_score = max(
             long_score,
@@ -941,22 +1861,15 @@ def deep_analysis(symbol, ticker):
             "Conditions mixed"
         )
 
-
     # =====================================================
     # ENTRY ZONE
     # =====================================================
 
     entry_zone = "Wait"
 
-    candles = get_candles(
-        symbol,
-        "5m",
-        6
-    )
+    if not df_5m.empty:
 
-    if not candles.empty:
-
-        last = candles.iloc[-1]
+        last = df_5m.iloc[-1]
 
         low = float(
             last["low"]
@@ -972,7 +1885,9 @@ def deep_analysis(symbol, ticker):
 
             entry_high = (
                 low +
-                (high - low) * 0.50
+                (
+                    high - low
+                ) * 0.50
             )
 
             entry_zone = (
@@ -984,7 +1899,9 @@ def deep_analysis(symbol, ticker):
 
             entry_low = (
                 high -
-                (high - low) * 0.50
+                (
+                    high - low
+                ) * 0.50
             )
 
             entry_high = high
@@ -994,6 +1911,15 @@ def deep_analysis(symbol, ticker):
                 f"{entry_high:.6g}"
             )
 
+    # =====================================================
+    # LEVERAGE
+    # =====================================================
+
+    leverage_display, leverage_group = (
+        leverage_category(
+            max_leverage
+        )
+    )
 
     # =====================================================
     # RESULT
@@ -1012,8 +1938,28 @@ def deep_analysis(symbol, ticker):
                 8
             ),
 
+        # -----------------------------------------------
+        # MTF
+        # -----------------------------------------------
+
         "1H Trend":
-            trend["trend"],
+            trend_1h,
+
+        "15m Trend":
+            trend_15m,
+
+        "5m Trend":
+            trend_5m,
+
+        "MTF State":
+            mtf["state"],
+
+        "MTF Confirmation":
+            mtf["confirmation"],
+
+        # -----------------------------------------------
+        # STRUCTURE
+        # -----------------------------------------------
 
         "15m Liquidity":
             sweep["liquidity"],
@@ -1021,10 +1967,81 @@ def deep_analysis(symbol, ticker):
         "5m BOS":
             bos["structure"],
 
+        # -----------------------------------------------
+        # VOLUME
+        # -----------------------------------------------
+
+        "24H Volume":
+            round(
+                float(
+                    ticker["24H Volume"]
+                ),
+                2
+            ),
+
+        "Volume Avg":
+            round(
+                average_volume,
+                2
+            ),
+
         "Volume x":
             round(
                 volume_ratio,
                 2
+            ),
+
+        "Market Vol x":
+            (
+                round(
+                    market_volume_ratio,
+                    2
+                )
+                if market_volume_ratio
+                is not None
+                else None
+            ),
+
+        "Volume Signal":
+            volume[
+                "volume_signal"
+            ],
+
+        # -----------------------------------------------
+        # OI
+        # -----------------------------------------------
+
+        "OI Current":
+            (
+                round(
+                    oi_current,
+                    2
+                )
+                if oi_current
+                is not None
+                else None
+            ),
+
+        "OI Average":
+            (
+                round(
+                    oi_average,
+                    2
+                )
+                if oi_average
+                is not None
+                else None
+            ),
+
+        "OI Avg x":
+            (
+                round(
+                    oi_ratio,
+                    2
+                )
+                if oi_ratio
+                is not None
+                else None
             ),
 
         "OI Change %":
@@ -1033,12 +2050,59 @@ def deep_analysis(symbol, ticker):
                     oi_change,
                     2
                 )
-                if oi_change is not None
+                if oi_change
+                is not None
                 else None
             ),
 
         "OI":
-            oi["oi_signal"],
+            oi[
+                "oi_signal"
+            ],
+
+        # -----------------------------------------------
+        # ATR
+        # -----------------------------------------------
+
+        "ATR":
+            (
+                round(
+                    atr_current,
+                    6
+                )
+                if atr_current
+                is not None
+                else None
+            ),
+
+        "ATR Avg":
+            (
+                round(
+                    atr_average,
+                    6
+                )
+                if atr_average
+                is not None
+                else None
+            ),
+
+        "ATR Change %":
+            (
+                round(
+                    atr_change,
+                    2
+                )
+                if atr_change
+                is not None
+                else None
+            ),
+
+        "ATR Signal":
+            atr_signal,
+
+        # -----------------------------------------------
+        # FUNDING
+        # -----------------------------------------------
 
         "Funding %":
             (
@@ -1046,14 +2110,31 @@ def deep_analysis(symbol, ticker):
                     funding_pct,
                     4
                 )
-                if funding_pct is not None
+                if funding_pct
+                is not None
                 else None
             ),
 
         "Funding":
             funding_signal,
 
-        # Separate scores
+        # -----------------------------------------------
+        # LEVERAGE
+        # -----------------------------------------------
+
+        "Max Leverage":
+            max_leverage,
+
+        "Leverage":
+            leverage_display,
+
+        "Leverage Group":
+            leverage_group,
+
+        # -----------------------------------------------
+        # SCORES
+        # -----------------------------------------------
+
         "Long Score":
             long_score,
 
@@ -1066,7 +2147,6 @@ def deep_analysis(symbol, ticker):
         "Short Signal":
             short_signal,
 
-        # Dominant
         "Score":
             dominant_score,
 
@@ -1139,10 +2219,23 @@ market = market.sort_values(
 
 
 # =========================================================
+# MARKET AVERAGES
+# =========================================================
+
+market_avg_volume = float(
+    market["24H Volume"].mean()
+)
+
+market_avg_oi = float(
+    market["OI"].mean()
+)
+
+
+# =========================================================
 # METRICS
 # =========================================================
 
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 
 with c1:
 
@@ -1161,6 +2254,13 @@ with c2:
 with c3:
 
     st.metric(
+        "Market Avg 24H Volume",
+        f"{market_avg_volume:,.0f}"
+    )
+
+with c4:
+
+    st.metric(
         "Deep Scan",
         DEEP_SCAN_LIMIT
     )
@@ -1174,14 +2274,49 @@ st.subheader(
     "📊 All Live Perpetuals"
 )
 
+st.caption(
+    "Market Average = सभी live perpetual contracts "
+    "का current average. Deep historical analysis "
+    "top active coins पर किया जाता है ताकि API load "
+    "control में रहे."
+)
+
+all_display = market.copy()
+
+all_display["Vol / Market Avg"] = (
+    all_display["24H Volume"] /
+    market_avg_volume
+    if market_avg_volume > 0
+    else np.nan
+)
+
+all_display["OI / Market Avg"] = (
+    all_display["OI"] /
+    market_avg_oi
+    if market_avg_oi > 0
+    else np.nan
+)
+
+all_display["Leverage"] = (
+    all_display["Max Leverage"]
+    .apply(
+        lambda x:
+        leverage_category(x)[0]
+    )
+)
+
 st.dataframe(
-    market[
+    all_display[
         [
             "Coin",
             "Price",
             "24H Volume",
+            "Vol / Market Avg",
             "OI",
-            "Funding"
+            "OI / Market Avg",
+            "Funding",
+            "Max Leverage",
+            "Leverage"
         ]
     ].head(250),
     use_container_width=True,
@@ -1233,7 +2368,7 @@ st.info(
 # =========================================================
 
 st.subheader(
-    "🎯 Scanner Results"
+    "🎯 Advanced Scanner Results"
 )
 
 results = []
@@ -1247,8 +2382,19 @@ for i, (_, row) in enumerate(
 ):
 
     result = deep_analysis(
+
         row["Coin"],
-        row
+
+        row,
+
+        row.get(
+            "Max Leverage"
+        ),
+
+        market_avg_volume,
+
+        market_avg_oi
+
     )
 
     if result:
@@ -1257,11 +2403,17 @@ for i, (_, row) in enumerate(
             result
         )
 
-    progress.progress(
-        int(
-            ((i + 1) / total) * 100
+    if total > 0:
+
+        progress.progress(
+            int(
+                (
+                    (i + 1)
+                    /
+                    total
+                ) * 100
+            )
         )
-    )
 
 progress.empty()
 
@@ -1304,7 +2456,7 @@ else:
 # =========================================================
 
 st.subheader(
-    "🟢 LONG — Separate Score & Funding"
+    "🟢 LONG — Complete Confirmation"
 )
 
 if not signals.empty:
@@ -1313,14 +2465,26 @@ if not signals.empty:
         [
             "Coin",
             "Price",
+            "MTF State",
             "1H Trend",
+            "15m Trend",
+            "5m Trend",
             "15m Liquidity",
             "5m BOS",
+            "24H Volume",
+            "Volume Avg",
             "Volume x",
+            "OI Current",
+            "OI Average",
+            "OI Avg x",
             "OI Change %",
-            "OI",
+            "ATR",
+            "ATR Avg",
+            "ATR Change %",
+            "ATR Signal",
             "Funding %",
             "Funding",
+            "Leverage",
             "Long Score",
             "Long Signal",
             "Long Reason"
@@ -1342,7 +2506,7 @@ if not signals.empty:
 # =========================================================
 
 st.subheader(
-    "🔴 SHORT — Separate Score & Funding"
+    "🔴 SHORT — Complete Confirmation"
 )
 
 if not signals.empty:
@@ -1351,14 +2515,26 @@ if not signals.empty:
         [
             "Coin",
             "Price",
+            "MTF State",
             "1H Trend",
+            "15m Trend",
+            "5m Trend",
             "15m Liquidity",
             "5m BOS",
+            "24H Volume",
+            "Volume Avg",
             "Volume x",
+            "OI Current",
+            "OI Average",
+            "OI Avg x",
             "OI Change %",
-            "OI",
+            "ATR",
+            "ATR Avg",
+            "ATR Change %",
+            "ATR Signal",
             "Funding %",
             "Funding",
+            "Leverage",
             "Short Score",
             "Short Signal",
             "Short Reason"
@@ -1407,10 +2583,15 @@ if not signals.empty:
                     "Price",
                     "Long Score",
                     "Long Signal",
+                    "MTF State",
                     "Funding %",
                     "Funding",
                     "OI Change %",
+                    "OI Avg x",
                     "Volume x",
+                    "ATR Change %",
+                    "ATR Signal",
+                    "Leverage",
                     "Entry Zone",
                     "Long Reason"
                 ]
@@ -1452,10 +2633,15 @@ if not signals.empty:
                     "Price",
                     "Short Score",
                     "Short Signal",
+                    "MTF State",
                     "Funding %",
                     "Funding",
                     "OI Change %",
+                    "OI Avg x",
                     "Volume x",
+                    "ATR Change %",
+                    "ATR Signal",
+                    "Leverage",
                     "Entry Zone",
                     "Short Reason"
                 ]
@@ -1490,8 +2676,91 @@ Between -0.05% and +0.05%
 → No score
 
 Funding ko अकेले signal nahi maana gaya hai.
-Liquidity + BOS + OI + Volume ke saath
+Liquidity + BOS + OI + Volume + MTF ke saath
 confirmation ke रूप में use kiya gaya hai.
+"""
+)
+
+
+# =========================================================
+# ATR EXPLANATION
+# =========================================================
+
+st.subheader(
+    "📐 ATR Logic"
+)
+
+st.write(
+    """
+ATR ↑ 5% या उससे ज्यादा
+→ Volatility expansion
+
+ATR ↓ 5% या उससे ज्यादा
+→ Volatility compression
+
+ATR expansion + Directional MTF
+→ संबंधित LONG/SHORT को +1
+
+ATR compression
+→ Directional score नहीं दिया जाता।
+
+इससे सिर्फ volatility बढ़ने को
+automatically bullish या bearish नहीं माना जाता।
+"""
+)
+
+
+# =========================================================
+# MULTI TIMEFRAME
+# =========================================================
+
+st.subheader(
+    "🧭 Multi-Timeframe Logic"
+)
+
+st.write(
+    """
+1H + 15m + 5m को साथ देखा जाता है।
+
+🟢 DIRECTIONAL UP
+→ कम से कम 2 timeframes bullish
+
+🔴 DIRECTIONAL DOWN
+→ कम से कम 2 timeframes bearish
+
+⚪ RANGE BOUND
+→ कम से कम 2 timeframes range
+
+🟡 UNCERTAINTY
+→ बाकी mixed conditions
+
+Directional MTF confirmation
+→ संबंधित direction को +2
+"""
+)
+
+
+# =========================================================
+# LEVERAGE
+# =========================================================
+
+st.subheader(
+    "⚡ Leverage Information"
+)
+
+st.write(
+    """
+20x category
+→ 20x से 50x से कम maximum leverage
+
+50x–200x
+→ अलग category
+
+200x से ऊपर
+→ 200x+ category
+
+Leverage को score में शामिल नहीं किया गया है।
+यह केवल risk/contract information है।
 """
 )
 
@@ -1508,21 +2777,65 @@ st.write(
     """
 220 live perpetuals
 ↓
-1H trend
+Activity / Volume ranking
 ↓
-15m liquidity sweep
+Top active coins
 ↓
-5m BOS
+1H Trend
 ↓
-OI displacement
+15m Trend + Liquidity Sweep
 ↓
-Volume
+5m Trend + BOS
+↓
+Multi-Timeframe State
+↓
+OI Current + OI Average + OI Change
+↓
+24H Volume + Average + Ratio
+↓
+ATR + ATR Average + ATR Direction
 ↓
 Funding
 ↓
-Separate LONG / SHORT score
+Separate LONG / SHORT Score
 ↓
 8+ = Strong setup
+"""
+)
+
+
+# =========================================================
+# IMPORTANT NOTE
+# =========================================================
+
+st.info(
+    """
+एक जरूरी बात:
+
+इस version में अभी scanner top active
+coins को deep scan करता है। सभी 220 coins
+पर candles + OI history एक साथ नहीं लिया जाता,
+क्योंकि API requests बहुत बढ़ जाएँगी और
+server problem दोबारा हो सकती है।
+
+All 220 coins की current ticker information
+ऊपर दिखाई जाती है।
+
+Deep historical analysis फिलहाल top
+active coins पर किया जाता है।
+
+अगले चरण में चाहें तो:
+
+1H trend
+→ 15m liquidity sweep
+→ 5m BOS
+→ OI displacement
+→ Funding
+→ ATR expansion
+→ Entry zone
+
+को और ज्यादा strictly filter करके
+signal quality test किया जा सकता है।
 """
 )
 
