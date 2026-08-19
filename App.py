@@ -5,1956 +5,541 @@ import numpy as np
 import time
 
 BASE_URL = "https://api.india.delta.exchange"
-
-HEADERS = {
-    "Accept": "application/json",
-    "User-Agent": "Delta-Reversal-Scanner/8.0"
-}
+HEADERS = {"Accept": "application/json", "User-Agent": "Delta-Reversal-Scanner/9.0"}
 
 CACHE_SECONDS = 120
 DEEP_SCAN_LIMIT = 30
+VOL_OI_MIN = 6.0
+RR_DEFAULT = 2.0
 
-st.set_page_config(
-    page_title="Delta Reversal Scanner",
-    layout="wide"
-)
+st.set_page_config(page_title="Delta Reversal Scanner PRO 9", layout="wide")
+st.title("🔥 Delta Reversal Scanner PRO 9")
+st.caption("MTF → 5D Regime → S/R → Sweep → BOS/CHOCH → FVG → OI → Funding → Volume → ATR")
 
-st.title("🔥 Delta Reversal Scanner PRO")
-
-st.caption(
-    "1H Trend → 15m Sweep → Swing → 5m BOS → FVG → "
-    "ATR → OI → Funding → Volume → Score"
-)
-
-
-# =========================================================
-# API
-# =========================================================
-
+# ---------------- API ----------------
 def api_get(path, params=None):
-
     try:
-        r = requests.get(
-            BASE_URL + path,
-            params=params,
-            headers=HEADERS,
-            timeout=15
-        )
-
+        r = requests.get(BASE_URL + path, params=params, headers=HEADERS, timeout=15)
         if r.status_code != 200:
             return None
-
         data = r.json()
-
         if data.get("success") is False:
             return None
-
         return data.get("result", [])
-
     except Exception:
         return None
 
-
-# =========================================================
-# PRODUCTS
-# =========================================================
-
 @st.cache_data(ttl=CACHE_SECONDS)
 def get_all_perpetuals():
-
     result = api_get("/v2/products")
-
     if not result:
         return pd.DataFrame()
-
     rows = []
-
     for p in result:
-
         if p.get("contract_type") != "perpetual_futures":
             continue
-
-        if p.get("state") != "live":
+        if p.get("state") != "live" or p.get("trading_status") != "operational":
             continue
-
-        if p.get("trading_status") != "operational":
-            continue
-
-        symbol = p.get("symbol")
-
-        if not symbol:
-            continue
-
-        rows.append({
-            "Coin": symbol,
-            "ID": p.get("id"),
-            "Underlying": p.get(
-                "underlying_asset", {}
-            ).get("symbol", "")
-        })
-
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        return df
-
-    return df.drop_duplicates("Coin")
-
-
-# =========================================================
-# TICKERS
-# =========================================================
+        s = p.get("symbol")
+        if s:
+            rows.append({"Coin": s, "ID": p.get("id")})
+    return pd.DataFrame(rows).drop_duplicates("Coin")
 
 @st.cache_data(ttl=CACHE_SECONDS)
 def get_tickers():
-
     result = api_get("/v2/tickers")
-
     if not result:
         return pd.DataFrame()
-
     rows = []
-
     for p in result:
-
-        symbol = p.get("symbol")
-
-        if not symbol:
+        s = p.get("symbol")
+        if not s:
             continue
-
         try:
-
-            price = float(
-                p.get(
-                    "close",
-                    p.get("mark_price", 0)
-                ) or 0
-            )
-
-            volume = float(
-                p.get(
-                    "volume_24h",
-                    p.get("volume", 0)
-                ) or 0
-            )
-
-            oi = float(
-                p.get(
-                    "open_interest",
-                    p.get("oi", 0)
-                ) or 0
-            )
-
+            price = float(p.get("close", p.get("mark_price", 0)) or 0)
+            vol = float(p.get("volume_24h", p.get("volume", 0)) or 0)
+            oi = float(p.get("open_interest", p.get("oi", 0)) or 0)
         except Exception:
             continue
-
         if price <= 0:
             continue
-
-        funding_raw = p.get(
-            "funding_rate",
-            p.get("funding", None)
-        )
-
+        raw = p.get("funding_rate", p.get("funding"))
         try:
-            funding = (
-                float(funding_raw)
-                if funding_raw is not None
-                else None
-            )
+            funding = float(raw) if raw is not None else None
         except Exception:
             funding = None
-
-        rows.append({
-            "Coin": symbol,
-            "Price": price,
-            "24H Volume": volume,
-            "OI": oi,
-            "Funding": funding
-        })
-
+        rows.append({"Coin": s, "Price": price, "24H Volume": vol, "OI": oi, "Funding": funding})
     df = pd.DataFrame(rows)
-
     if df.empty:
         return df
-
-    df["Vol/OI"] = (
-        df["24H Volume"] /
-        df["OI"].replace(0, np.nan)
-    )
-
+    df["Vol/OI"] = df["24H Volume"] / df["OI"].replace(0, np.nan)
     return df
-
-
-# =========================================================
-# CANDLES
-# =========================================================
 
 @st.cache_data(ttl=CACHE_SECONDS)
 def get_candles(symbol, resolution, hours):
-
     end = int(time.time())
-    start = end - hours * 3600
-
-    result = api_get(
-        "/v2/history/candles",
-        {
-            "resolution": resolution,
-            "symbol": symbol,
-            "start": start,
-            "end": end
-        }
-    )
-
+    start = end - int(hours * 3600)
+    result = api_get("/v2/history/candles", {
+        "resolution": resolution, "symbol": symbol, "start": start, "end": end
+    })
     if not result:
         return pd.DataFrame()
-
     df = pd.DataFrame(result)
-
     if df.empty:
         return df
-
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
-    ]:
-
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
-                errors="coerce"
-            )
-
-    return df.dropna(
-        subset=[
-            "open",
-            "high",
-            "low",
-            "close"
-        ]
-    ).sort_values("time").reset_index(drop=True)
-
-
-# =========================================================
-# ATR
-# =========================================================
-
-def add_atr(df, period=14):
-
-    df = df.copy()
-
-    prev_close = df["close"].shift(1)
-
-    tr1 = df["high"] - df["low"]
-    tr2 = abs(df["high"] - prev_close)
-    tr3 = abs(df["low"] - prev_close)
-
-    df["TR"] = pd.concat(
-        [tr1, tr2, tr3],
-        axis=1
-    ).max(axis=1)
-
-    df["ATR"] = (
-        df["TR"]
-        .rolling(period)
-        .mean()
-    )
-
-    return df
-
-
-def atr_direction(df):
-
-    if len(df) < 20:
-        return "⚪ UNKNOWN"
-
-    atr_now = df["ATR"].iloc[-1]
-    atr_old = df["ATR"].iloc[-6]
-
-    if pd.isna(atr_now) or pd.isna(atr_old):
-        return "⚪ UNKNOWN"
-
-    if atr_now > atr_old * 1.10:
-        return "🔺 ATR RISING"
-
-    if atr_now < atr_old * 0.90:
-        return "🔻 ATR FALLING"
-
-    return "⚪ ATR FLAT"
-
-
-# =========================================================
-# SWING HIGH / LOW
-# =========================================================
-
-def find_swings(df, left=2, right=2):
-
-    df = df.copy()
-
-    df["SwingHigh"] = False
-    df["SwingLow"] = False
-
-    for i in range(
-        left,
-        len(df) - right
-    ):
-
-        high = df["high"].iloc[i]
-        low = df["low"].iloc[i]
-
-        left_high = df["high"].iloc[
-            i-left:i
-        ].max()
-
-        right_high = df["high"].iloc[
-            i+1:i+right+1
-        ].max()
-
-        left_low = df["low"].iloc[
-            i-left:i
-        ].min()
-
-        right_low = df["low"].iloc[
-            i+1:i+right+1
-        ].min()
-
-        if high > left_high and high > right_high:
-            df.loc[i, "SwingHigh"] = True
-
-        if low < left_low and low < right_low:
-            df.loc[i, "SwingLow"] = True
-
-    return df
-
-
-# =========================================================
-# FVG
-# =========================================================
-
-def detect_fvg(df):
-
-    bull = False
-    bear = False
-
-    if len(df) < 4:
-        return bull, bear
-
-    a = df.iloc[-3]
-    b = df.iloc[-2]
-    c = df.iloc[-1]
-
-    # Bullish FVG
-    if c["low"] > a["high"]:
-        bull = True
-
-    # Bearish FVG
-    if c["high"] < a["low"]:
-        bear = True
-
-    return bull, bear
-
-
-# =========================================================
-# 1H TREND
-# =========================================================
-
-def analyze_1h(symbol):
-
-    df = get_candles(
-        symbol,
-        "1h",
-        72
-    )
-
-    if df.empty or len(df) < 25:
-        return "⚪ UNKNOWN"
-
-    close = df["close"]
-
-    ema9 = close.ewm(
-        span=9,
-        adjust=False
-    ).mean()
-
-    ema21 = close.ewm(
-        span=21,
-        adjust=False
-    ).mean()
-
-    price = close.iloc[-1]
-
-    if price > ema9.iloc[-1] > ema21.iloc[-1]:
-        return "🟢 BULLISH"
-
-    if price < ema9.iloc[-1] < ema21.iloc[-1]:
-        return "🔴 BEARISH"
-
-    return "⚪ NEUTRAL"
-
-
-# =========================================================
-# 15M SWEEP
-# =========================================================
-
-def analyze_15m(symbol):
-
-    df = get_candles(
-        symbol,
-        "15m",
-        30
-    )
-
-    if df.empty or len(df) < 12:
-
-        return {
-            "bull": False,
-            "bear": False,
-            "name": "⚪ None"
-        }
-
-    df = find_swings(df)
-
-    last = df.iloc[-1]
-
-    swing_highs = df[
-        df["SwingHigh"]
-    ]
-
-    swing_lows = df[
-        df["SwingLow"]
-    ]
-
-    if swing_highs.empty or swing_lows.empty:
-
-        previous_high = df["high"].iloc[-7:-1].max()
-        previous_low = df["low"].iloc[-7:-1].min()
-
-    else:
-
-        previous_high = swing_highs["high"].iloc[-1]
-        previous_low = swing_lows["low"].iloc[-1]
-
-    bull = (
-        last["low"] < previous_low
-        and
-        last["close"] > previous_low
-    )
-
-    bear = (
-        last["high"] > previous_high
-        and
-        last["close"] < previous_high
-    )
-
-    if bull:
-        name = "🟢 BULL SWEEP"
-    elif bear:
-        name = "🔴 BEAR SWEEP"
-    else:
-        name = "⚪ None"
-
-    return {
-        "bull": bull,
-        "bear": bear,
-        "name": name
-    }
-
-
-# =========================================================
-# 5M STRUCTURE + FVG
-# =========================================================
-
-def analyze_5m(symbol):
-
-    df = get_candles(
-        symbol,
-        "5m",
-        24
-    )
-
-    if df.empty or len(df) < 20:
-
-        return {
-            "bull_bos": False,
-            "bear_bos": False,
-            "structure": "⚪ None",
-            "fvg": "⚪ None",
-            "bull_fvg": False,
-            "bear_fvg": False
-        }
-
-    df = find_swings(df)
-
-    last = df.iloc[-1]
-
-    swing_highs = df[
-        df["SwingHigh"]
-    ]
-
-    swing_lows = df[
-        df["SwingLow"]
-    ]
-
-    if not swing_highs.empty:
-        last_swing_high = swing_highs["high"].iloc[-1]
-    else:
-        last_swing_high = df["high"].iloc[-8:-1].max()
-
-    if not swing_lows.empty:
-        last_swing_low = swing_lows["low"].iloc[-1]
-    else:
-        last_swing_low = df["low"].iloc[-8:-1].min()
-
-    bull_bos = (
-        last["close"] >
-        last_swing_high
-    )
-
-    bear_bos = (
-        last["close"] <
-        last_swing_low
-    )
-
-    bull_fvg, bear_fvg = detect_fvg(df)
-
-    if bull_bos:
-        structure = "🟢 BULL BOS"
-    elif bear_bos:
-        structure = "🔴 BEAR BOS"
-    else:
-        structure = "⚪ None"
-
-    if bull_fvg:
-        fvg = "🟢 BULL FVG"
-    elif bear_fvg:
-        fvg = "🔴 BEAR FVG"
-    else:
-        fvg = "⚪ None"
-
-    return {
-        "bull_bos": bull_bos,
-        "bear_bos": bear_bos,
-        "structure": structure,
-        "fvg": fvg,
-        "bull_fvg": bull_fvg,
-        "bear_fvg": bear_fvg
-    }
-
-
-# =========================================================
-# VOLUME
-# =========================================================
-
-def analyze_volume(symbol):
-
-    df = get_candles(
-        symbol,
-        "5m",
-        12
-    )
-
-    if df.empty or len(df) < 6:
-        return 0
-
-    current = df["volume"].iloc[-1]
-
-    average = df["volume"].iloc[-6:-1].mean()
-
-    if average <= 0:
-        return 0
-
-    return current / average
-
-
-# =========================================================
-# OI HISTORY
-# =========================================================
+    for c in ["open", "high", "low", "close", "volume"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    if "time" in df.columns:
+        df["time"] = pd.to_numeric(df["time"], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    return df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
 @st.cache_data(ttl=CACHE_SECONDS)
-def get_oi_history(symbol):
-
+def get_oi_history(symbol, hours=24):
     end = int(time.time())
-    start = end - 12 * 3600
-
-    result = api_get(
-        "/v2/history/candles",
-        {
-            "resolution": "15m",
-            "symbol": "OI:" + symbol,
-            "start": start,
-            "end": end
-        }
-    )
-
+    start = end - hours * 3600
+    result = api_get("/v2/history/candles", {
+        "resolution": "15m", "symbol": "OI:" + symbol, "start": start, "end": end
+    })
     if not result:
         return pd.DataFrame()
-
     df = pd.DataFrame(result)
-
     if df.empty or "close" not in df.columns:
         return pd.DataFrame()
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    return df.dropna(subset=["close"]).sort_values("time").reset_index(drop=True)
 
-    df["close"] = pd.to_numeric(
-        df["close"],
-        errors="coerce"
-    )
+# ---------------- indicators ----------------
+def add_atr(df, period=14):
+    x = df.copy()
+    pc = x["close"].shift(1)
+    tr = pd.concat([
+        x["high"] - x["low"],
+        (x["high"] - pc).abs(),
+        (x["low"] - pc).abs()
+    ], axis=1).max(axis=1)
+    x["ATR"] = tr.rolling(period).mean()
+    x["ATRpct"] = x["ATR"] / x["close"] * 100
+    return x
 
-    return df.dropna(
-        subset=["close"]
-    ).sort_values("time")
+def swings(df, left=2, right=2):
+    x = df.copy()
+    x["SwingHigh"] = False
+    x["SwingLow"] = False
+    for i in range(left, len(x)-right):
+        if x["high"].iloc[i] > x["high"].iloc[i-left:i].max() and x["high"].iloc[i] > x["high"].iloc[i+1:i+right+1].max():
+            x.loc[x.index[i], "SwingHigh"] = True
+        if x["low"].iloc[i] < x["low"].iloc[i-left:i].min() and x["low"].iloc[i] < x["low"].iloc[i+1:i+right+1].min():
+            x.loc[x.index[i], "SwingLow"] = True
+    return x
 
+def closed(df):
+    # Drop the currently forming candle when time is available.
+    if df.empty or "time" not in df.columns:
+        return df
+    now = int(time.time())
+    if len(df) >= 2:
+        last_t = int(df["time"].iloc[-1])
+        # If the final candle started less than one resolution period ago,
+        # it is likely still forming. A conservative check is used.
+        # Caller supplies enough history; remove only an obviously current candle.
+        if now - last_t < 60:
+            return df.iloc[:-1].copy()
+    return df
 
-def analyze_oi(symbol):
+def timeframe_trend(df):
+    if len(df) < 30:
+        return "⚪ UNKNOWN"
+    c = df["close"]
+    e9 = c.ewm(span=9, adjust=False).mean()
+    e21 = c.ewm(span=21, adjust=False).mean()
+    e50 = c.ewm(span=50, adjust=False).mean()
+    if c.iloc[-1] > e9.iloc[-1] > e21.iloc[-1] > e50.iloc[-1]:
+        return "🟢 BULL"
+    if c.iloc[-1] < e9.iloc[-1] < e21.iloc[-1] < e50.iloc[-1]:
+        return "🔴 BEAR"
+    return "🟡 MIXED"
 
-    df = get_oi_history(symbol)
-
-    if df.empty or len(df) < 6:
-
-        return {
-            "change": None,
-            "signal": "⚪ Unknown"
-        }
-
-    current = df["close"].iloc[-1]
-    old = df["close"].iloc[-6]
-
-    if old == 0:
-        return {
-            "change": None,
-            "signal": "⚪ Unknown"
-        }
-
-    change = (
-        (current - old) /
-        abs(old)
-    ) * 100
-
-    if change >= 1:
-        signal = "🔺 OI UP"
-    elif change <= -1:
-        signal = "🔻 OI DOWN"
+def regime_5d(symbol):
+    df = get_candles(symbol, "1h", 5 * 24 + 10)
+    if len(df) < 60:
+        return {"state": "⚪ UNKNOWN", "range_pct": None}
+    x = df.iloc[-120:] if len(df) > 120 else df
+    first = x["close"].iloc[0]
+    last = x["close"].iloc[-1]
+    hi = x["high"].max()
+    lo = x["low"].min()
+    rng = (hi-lo)/lo*100 if lo else 0
+    move = (last-first)/first*100 if first else 0
+    if move > 4:
+        state = "🟢 5D UPTREND"
+    elif move < -4:
+        state = "🔴 5D DOWNTREND"
+    elif rng > 12 and abs(move) < 3:
+        state = "🟡 5D RANGE"
     else:
-        signal = "⚪ OI FLAT"
+        state = "⚪ 5D UNCERTAINTY"
+    return {"state": state, "range_pct": rng}
 
+def sr_levels(df, lookback=80, tol=0.006):
+    x = swings(df.iloc[-lookback:].copy(), 2, 2)
+    highs = x.loc[x["SwingHigh"], "high"].tolist()
+    lows = x.loc[x["SwingLow"], "low"].tolist()
+    price = float(df["close"].iloc[-1])
+    supports = sorted([v for v in lows if v < price], reverse=True)
+    resistances = sorted([v for v in highs if v > price])
+    support = supports[0] if supports else np.nan
+    resistance = resistances[0] if resistances else np.nan
+    return support, resistance, len(supports), len(resistances)
+
+def sweep_bos_fvg(df):
+    x = swings(df, 2, 2)
+    last = x.iloc[-1]
+    sh = x.loc[x["SwingHigh"], "high"]
+    sl = x.loc[x["SwingLow"], "low"]
+    ph = sh.iloc[-1] if len(sh) else x["high"].iloc[-8:-1].max()
+    pl = sl.iloc[-1] if len(sl) else x["low"].iloc[-8:-1].min()
+    bull_sweep = last["low"] < pl and last["close"] > pl
+    bear_sweep = last["high"] > ph and last["close"] < ph
+    prev_h = x["high"].iloc[-8:-1].max()
+    prev_l = x["low"].iloc[-8:-1].min()
+    bull_bos = last["close"] > prev_h
+    bear_bos = last["close"] < prev_l
+    # CHOCH approximation: break opposite to recent directional structure.
+    recent = x.iloc[-20:]
+    if len(recent) >= 10:
+        prior_high = recent["high"].iloc[:10].max()
+        prior_low = recent["low"].iloc[:10].min()
+    else:
+        prior_high, prior_low = prev_h, prev_l
+    bull_choch = last["close"] > prior_high and not bull_bos
+    bear_choch = last["close"] < prior_low and not bear_bos
+    bull_fvg = len(x) >= 3 and x["low"].iloc[-1] > x["high"].iloc[-3]
+    bear_fvg = len(x) >= 3 and x["high"].iloc[-1] < x["low"].iloc[-3]
     return {
-        "change": change,
-        "signal": signal
+        "bull_sweep": bull_sweep, "bear_sweep": bear_sweep,
+        "bull_bos": bull_bos, "bear_bos": bear_bos,
+        "bull_choch": bull_choch, "bear_choch": bear_choch,
+        "bull_fvg": bull_fvg, "bear_fvg": bear_fvg,
+        "swing_high": float(ph), "swing_low": float(pl)
     }
 
+def oi_analysis(symbol):
+    df = get_oi_history(symbol, 24)
+    if len(df) < 7:
+        return None, "⚪ UNKNOWN"
+    cur = float(df["close"].iloc[-1])
+    old = float(df["close"].iloc[-7])
+    if old == 0:
+        return None, "⚪ UNKNOWN"
+    ch = (cur-old)/abs(old)*100
+    return ch, ("🔺 OI UP" if ch >= 1 else "🔻 OI DOWN" if ch <= -1 else "⚪ OI FLAT")
 
-# =========================================================
-# MARKET STATE
-# =========================================================
+def volume_analysis(df):
+    if len(df) < 10:
+        return 0
+    avg = df["volume"].iloc[-7:-1].mean()
+    return float(df["volume"].iloc[-1]/avg) if avg > 0 else 0
 
-def market_state(trend, sweep, bos, atr_dir):
+def atr_analysis(df):
+    x = add_atr(df)
+    if len(x) < 25 or pd.isna(x["ATR"].iloc[-1]) or pd.isna(x["ATR"].iloc[-7]):
+        return None, "⚪ UNKNOWN"
+    a = float(x["ATR"].iloc[-1])
+    old = float(x["ATR"].iloc[-7])
+    d = a/old if old else 1
+    direction = "🔺 ATR EXPANDING" if d >= 1.10 else "🔻 ATR CONTRACTING" if d <= .90 else "⚪ ATR FLAT"
+    return a, direction
 
-    bull = 0
-    bear = 0
+def mtf_state(t5, t15, t1):
+    bulls = sum(v == "🟢 BULL" for v in [t5,t15,t1])
+    bears = sum(v == "🔴 BEAR" for v in [t5,t15,t1])
+    if bulls == 3: return "🟢 MTF ALIGNED LONG"
+    if bears == 3: return "🔴 MTF ALIGNED SHORT"
+    if bulls >= 2 and bears == 0: return "🟢 MTF LONG BIAS"
+    if bears >= 2 and bulls == 0: return "🔴 MTF SHORT BIAS"
+    if bulls == 0 and bears == 0: return "🟡 MTF RANGE/MIXED"
+    return "⚪ MTF CONFLICT"
 
-    if trend == "🟢 BULLISH":
-        bull += 2
-
-    if trend == "🔴 BEARISH":
-        bear += 2
-
-    if sweep["bull"]:
-        bull += 2
-
-    if sweep["bear"]:
-        bear += 2
-
-    if bos["bull_bos"]:
-        bull += 2
-
-    if bos["bear_bos"]:
-        bear += 2
-
-    if bull >= bear + 2:
-        return "🟢 DIRECTIONAL LONG"
-
-    if bear >= bull + 2:
-        return "🔴 DIRECTIONAL SHORT"
-
-    if bull <= 1 and bear <= 1:
-        return "🟡 RANGE BOUND"
-
-    return "⚪ UNCERTAINTY"
-
-
-# =========================================================
-# LIVE ANALYSIS
-# =========================================================
-
+# ---------------- live ----------------
 def deep_analysis(symbol, ticker):
+    d5 = closed(get_candles(symbol, "5m", 36))
+    d15 = closed(get_candles(symbol, "15m", 72))
+    d1 = closed(get_candles(symbol, "1h", 120))
+    if min(len(d5),len(d15),len(d1)) < 25:
+        return None
 
-    trend = analyze_1h(symbol)
-
-    sweep = analyze_15m(symbol)
-
-    bos = analyze_5m(symbol)
-
-    volume_ratio = analyze_volume(symbol)
-
-    oi = analyze_oi(symbol)
-
-    candles = get_candles(
-        symbol,
-        "5m",
-        24
-    )
-
-    if candles.empty:
-        atr_dir = "⚪ UNKNOWN"
-        atr_value = None
-    else:
-        candles = add_atr(candles)
-        atr_dir = atr_direction(candles)
-        atr_value = candles["ATR"].iloc[-1]
-
-    state = market_state(
-        trend,
-        sweep,
-        bos,
-        atr_dir
-    )
+    t5, t15, t1 = timeframe_trend(d5), timeframe_trend(d15), timeframe_trend(d1)
+    mtf = mtf_state(t5,t15,t1)
+    reg = regime_5d(symbol)
+    sr_sup, sr_res, sup_count, res_count = sr_levels(d15)
+    struct = sweep_bos_fvg(d5)
+    atr, atr_dir = atr_analysis(d5)
+    volx = volume_analysis(d5)
+    oi_ch, oi_sig = oi_analysis(symbol)
 
     funding = ticker.get("Funding")
+    fp = float(funding)*100 if funding is not None else None
+    price = float(ticker["Price"])
 
-    funding_pct = None
+    long_score = short_score = 0
+    lr, sr = [], []
 
-    if funding is not None:
+    # MTF: strongest condition
+    if mtf == "🟢 MTF ALIGNED LONG": long_score += 4; lr.append("5m+15m+1H aligned")
+    elif mtf == "🔴 MTF ALIGNED SHORT": short_score += 4; sr.append("5m+15m+1H aligned")
+    elif mtf == "🟢 MTF LONG BIAS": long_score += 2; lr.append("MTF long bias")
+    elif mtf == "🔴 MTF SHORT BIAS": short_score += 2; sr.append("MTF short bias")
+    elif mtf == "⚪ MTF CONFLICT":
+        long_score -= 2; short_score -= 2
 
-        try:
-            funding_pct = float(funding) * 100
-        except:
-            funding_pct = None
+    # 5D regime
+    if "UPTREND" in reg["state"]: long_score += 2; lr.append("5D uptrend")
+    elif "DOWNTREND" in reg["state"]: short_score += 2; sr.append("5D downtrend")
+    elif "RANGE" in reg["state"]: long_score -= 1; short_score -= 1
 
-    long_score = 0
-    short_score = 0
+    # Structure
+    if struct["bull_sweep"]: long_score += 2; lr.append("liquidity sweep")
+    if struct["bear_sweep"]: short_score += 2; sr.append("liquidity sweep")
+    if struct["bull_bos"]: long_score += 3; lr.append("BOS")
+    if struct["bear_bos"]: short_score += 3; sr.append("BOS")
+    if struct["bull_choch"]: long_score += 2; lr.append("CHOCH")
+    if struct["bear_choch"]: short_score += 2; sr.append("CHOCH")
+    if struct["bull_fvg"]: long_score += 2; lr.append("bull FVG")
+    if struct["bear_fvg"]: short_score += 2; sr.append("bear FVG")
 
-    long_reason = []
-    short_reason = []
+    # S/R confluence
+    if not pd.isna(sr_sup):
+        dist = abs(price-sr_sup)/price
+        if dist <= .01: long_score += 2; lr.append("near support")
+    if not pd.isna(sr_res):
+        dist = abs(sr_res-price)/price
+        if dist <= .01: short_score += 2; sr.append("near resistance")
 
-    # -------------------------------
-    # TREND
-    # -------------------------------
+    # Volume
+    if volx >= 2: long_score += 2; short_score += 2; lr.append("volume spike"); sr.append("volume spike")
+    elif volx >= 1.3: long_score += 1; short_score += 1
 
-    if trend == "🟢 BULLISH":
+    # OI displacement
+    if oi_ch is not None:
+        if oi_ch >= 1:
+            if mtf.startswith("🟢"): long_score += 2; lr.append("OI expansion")
+            if mtf.startswith("🔴"): short_score += 2; sr.append("OI expansion")
+        elif oi_ch <= -1:
+            if struct["bull_sweep"]: long_score += 1; lr.append("OI unwind after sweep")
+            if struct["bear_sweep"]: short_score += 1; sr.append("OI unwind after sweep")
 
-        long_score += 2
-        long_reason.append("1H bullish")
-
-    if trend == "🔴 BEARISH":
-
-        short_score += 2
-        short_reason.append("1H bearish")
-
-    # -------------------------------
-    # SWEEP
-    # -------------------------------
-
-    if sweep["bull"]:
-
-        long_score += 2
-        long_reason.append("15m liquidity sweep")
-
-    if sweep["bear"]:
-
-        short_score += 2
-        short_reason.append("15m liquidity sweep")
-
-    # -------------------------------
-    # BOS
-    # -------------------------------
-
-    if bos["bull_bos"]:
-
-        long_score += 3
-        long_reason.append("5m BOS")
-
-    if bos["bear_bos"]:
-
-        short_score += 3
-        short_reason.append("5m BOS")
-
-    # -------------------------------
-    # FVG
-    # -------------------------------
-
-    if bos["bull_fvg"]:
-
-        long_score += 2
-        long_reason.append("Bull FVG")
-
-    if bos["bear_fvg"]:
-
-        short_score += 2
-        short_reason.append("Bear FVG")
-
-    # -------------------------------
-    # VOLUME
-    # -------------------------------
-
-    if volume_ratio >= 2:
-
-        long_score += 2
-        short_score += 2
-
-        long_reason.append("Volume spike")
-        short_reason.append("Volume spike")
-
-    elif volume_ratio >= 1.3:
-
-        long_score += 1
-        short_score += 1
-
-    # -------------------------------
-    # OI
-    # -------------------------------
-
-    oi_change = oi["change"]
-
-    if oi_change is not None:
-
-        if oi_change >= 1:
-
-            if trend == "🟢 BULLISH":
-
-                long_score += 1
-                long_reason.append("OI rising")
-
-            if trend == "🔴 BEARISH":
-
-                short_score += 1
-                short_reason.append("OI rising")
-
-        elif oi_change <= -1:
-
-            if sweep["bull"]:
-
-                long_score += 1
-                long_reason.append("OI falling after sweep")
-
-            if sweep["bear"]:
-
-                short_score += 1
-                short_reason.append("OI falling after sweep")
-
-    # -------------------------------
-    # FUNDING
-    # -------------------------------
-
-    if funding_pct is not None:
-
-        if funding_pct >= 0.05:
-
-            short_score += 2
-
-            short_reason.append(
-                "Long crowding / positive funding"
-            )
-
-            funding_signal = "🔴 Long crowded"
-
-        elif funding_pct <= -0.05:
-
-            long_score += 2
-
-            long_reason.append(
-                "Short crowding / negative funding"
-            )
-
-            funding_signal = "🟢 Short crowded"
-
-        else:
-
-            funding_signal = "⚪ Neutral"
-
+    # Funding
+    if fp is not None:
+        if fp >= .05: short_score += 2; sr.append("positive funding crowding"); funding_signal="🔴 Long crowded"
+        elif fp <= -.05: long_score += 2; lr.append("negative funding crowding"); funding_signal="🟢 Short crowded"
+        else: funding_signal="⚪ Neutral"
     else:
+        funding_signal="⚪ Unavailable"
 
-        funding_signal = "⚪ Unavailable"
-
-    # -------------------------------
     # ATR
-    # -------------------------------
+    if atr_dir == "🔺 ATR EXPANDING": long_score += 1; short_score += 1
+    elif atr_dir == "🔻 ATR CONTRACTING": long_score -= 1; short_score -= 1
 
-    if atr_dir == "🔺 ATR RISING":
-
-        long_score += 1
-        short_score += 1
-
-    # Falling ATR does NOT add score.
-    # It means volatility is contracting.
-
-    # -------------------------------
-    # SIGNALS
-    # -------------------------------
-
-    if long_score >= 8:
-        long_signal = "🟢 STRONG LONG"
-    elif long_score >= 5:
-        long_signal = "🟡 LONG WATCH"
-    else:
-        long_signal = "⚪ NO LONG"
-
-    if short_score >= 8:
-        short_signal = "🔴 STRONG SHORT"
-    elif short_score >= 5:
-        short_signal = "🟠 SHORT WATCH"
-    else:
-        short_signal = "⚪ NO SHORT"
-
-    if long_score > short_score and long_score >= 5:
-
-        signal = long_signal
-        score = long_score
-        reason = " + ".join(long_reason)
-
+    # Hard block on MTF conflict
+    blocked = mtf == "⚪ MTF CONFLICT"
+    if blocked:
+        signal = "⛔ MTF CONFLICT"
+    elif long_score > short_score and long_score >= 8:
+        signal = "🟢 STRONG LONG"
+    elif short_score > long_score and short_score >= 8:
+        signal = "🔴 STRONG SHORT"
+    elif long_score > short_score and long_score >= 5:
+        signal = "🟡 LONG WATCH"
     elif short_score > long_score and short_score >= 5:
-
-        signal = short_signal
-        score = short_score
-        reason = " + ".join(short_reason)
-
+        signal = "🟠 SHORT WATCH"
     else:
-
         signal = "⚪ NO SIGNAL"
-        score = max(long_score, short_score)
-        reason = "Mixed conditions"
 
+    score = max(long_score, short_score)
     return {
-        "Coin": symbol,
-        "Price": ticker["Price"],
-        "24H Volume": ticker["24H Volume"],
-        "OI": ticker["OI"],
-        "Vol/OI": ticker["Vol/OI"],
-        "1H Trend": trend,
-        "15m Liquidity": sweep["name"],
-        "5m BOS": bos["structure"],
-        "FVG": bos["fvg"],
-        "ATR": round(atr_value, 8)
-        if atr_value is not None else None,
-        "ATR Direction": atr_dir,
-        "Volume x": round(volume_ratio, 2),
-        "OI Change %": round(oi_change, 2)
-        if oi_change is not None else None,
-        "Funding %": round(funding_pct, 4)
-        if funding_pct is not None else None,
-        "Funding": funding_signal,
-        "Market State": state,
-        "Long Score": long_score,
-        "Long Signal": long_signal,
-        "Short Score": short_score,
-        "Short Signal": short_signal,
-        "Score": score,
-        "Signal": signal,
-        "Long Reason": " + ".join(long_reason),
-        "Short Reason": " + ".join(short_reason),
-        "Reason": reason
+        "Coin": symbol, "Price": price, "24H Volume": ticker["24H Volume"],
+        "OI": ticker["OI"], "Vol/OI": round(float(ticker["Vol/OI"]),2),
+        "5m":t5, "15m":t15, "1H":t1, "MTF":mtf,
+        "5D Regime":reg["state"], "5D Range %":round(reg["range_pct"],2) if reg["range_pct"] else None,
+        "Support":round(sr_sup,8) if not pd.isna(sr_sup) else None,
+        "Resistance":round(sr_res,8) if not pd.isna(sr_res) else None,
+        "S/R Count":f"{sup_count}/{res_count}",
+        "Liquidity":("🟢 BULL SWEEP" if struct["bull_sweep"] else "🔴 BEAR SWEEP" if struct["bear_sweep"] else "⚪ None"),
+        "BOS":("🟢 BULL BOS" if struct["bull_bos"] else "🔴 BEAR BOS" if struct["bear_bos"] else "⚪ None"),
+        "CHOCH":("🟢 BULL CHOCH" if struct["bull_choch"] else "🔴 BEAR CHOCH" if struct["bear_choch"] else "⚪ None"),
+        "FVG":("🟢 BULL FVG" if struct["bull_fvg"] else "🔴 BEAR FVG" if struct["bear_fvg"] else "⚪ None"),
+        "ATR":round(atr,8) if atr else None, "ATR Direction":atr_dir,
+        "Volume x":round(volx,2), "OI Change %":round(oi_ch,2) if oi_ch is not None else None,
+        "OI Signal":oi_sig, "Funding %":round(fp,4) if fp is not None else None,
+        "Funding":funding_signal, "Long Score":long_score, "Short Score":short_score,
+        "Score":score, "Signal":signal,
+        "Long Reason":" + ".join(lr) if lr else "None",
+        "Short Reason":" + ".join(sr) if sr else "None"
     }
 
-
-# =========================================================
-# BACKTEST ENGINE
-# =========================================================
-
-def backtest_symbol(
-    symbol,
-    days=7,
-    rr=2.0,
-    threshold=8
-):
-
-    df = get_candles(
-        symbol,
-        "5m",
-        days * 24
-    )
-
-    if df.empty or len(df) < 150:
+# ---------------- backtest ----------------
+def backtest_symbol(symbol, days=7, rr=2.0, threshold=8):
+    # Conservative historical test using only data available before each candle.
+    df = get_candles(symbol, "5m", days*24)
+    if len(df) < 180:
         return []
-
-    df = add_atr(df)
-    df = find_swings(df)
-
-    trades = []
-
-    start_index = 50
-
-    for i in range(
-        start_index,
-        len(df) - 20
-    ):
-
-        current = df.iloc[i]
-
-        # ---------------------------------
-        # Historical window
-        # ---------------------------------
-
-        hist = df.iloc[
-            max(0, i-50):i+1
-        ]
-
-        if len(hist) < 20:
-            continue
-
-        # ---------------------------------
-        # ATR
-        # ---------------------------------
-
-        atr_now = hist["ATR"].iloc[-1]
-
-        atr_old = hist["ATR"].iloc[-6]
-
-        if pd.isna(atr_now) or pd.isna(atr_old):
-            continue
-
-        if atr_now > atr_old * 1.10:
-            atr_rising = True
-        else:
-            atr_rising = False
-
-        # ---------------------------------
-        # Swing levels
-        # ---------------------------------
-
-        swing_highs = hist[
-            hist["SwingHigh"]
-        ]
-
-        swing_lows = hist[
-            hist["SwingLow"]
-        ]
-
-        if swing_highs.empty or swing_lows.empty:
-            continue
-
-        swing_high = swing_highs["high"].iloc[-1]
-        swing_low = swing_lows["low"].iloc[-1]
-
-        # ---------------------------------
-        # Liquidity sweep
-        # ---------------------------------
-
-        bull_sweep = (
-            current["low"] < swing_low
-            and
-            current["close"] > swing_low
-        )
-
-        bear_sweep = (
-            current["high"] > swing_high
-            and
-            current["close"] < swing_high
-        )
-
-        # ---------------------------------
-        # BOS
-        # ---------------------------------
-
-        previous_high = hist["high"].iloc[-8:-1].max()
-        previous_low = hist["low"].iloc[-8:-1].min()
-
-        bull_bos = (
-            current["close"] >
-            previous_high
-        )
-
-        bear_bos = (
-            current["close"] <
-            previous_low
-        )
-
-        # ---------------------------------
-        # FVG
-        # ---------------------------------
-
-        if i >= 2:
-
-            a = df.iloc[i-2]
-            c = df.iloc[i]
-
-            bull_fvg = (
-                c["low"] > a["high"]
-            )
-
-            bear_fvg = (
-                c["high"] < a["low"]
-            )
-
-        else:
-
-            bull_fvg = False
-            bear_fvg = False
-
-        # ---------------------------------
-        # Volume
-        # ---------------------------------
-
-        avg_volume = hist[
-            "volume"
-        ].iloc[-6:-1].mean()
-
-        if avg_volume <= 0:
-            continue
-
-        volume_ratio = (
-            current["volume"] /
-            avg_volume
-        )
-
-        # ---------------------------------
-        # Score
-        # ---------------------------------
-
-        long_score = 0
-        short_score = 0
-
-        if bull_sweep:
-            long_score += 2
-
-        if bear_sweep:
-            short_score += 2
-
-        if bull_bos:
-            long_score += 3
-
-        if bear_bos:
-            short_score += 3
-
-        if bull_fvg:
-            long_score += 2
-
-        if bear_fvg:
-            short_score += 2
-
-        if volume_ratio >= 2:
-            long_score += 2
-            short_score += 2
-
-        elif volume_ratio >= 1.3:
-            long_score += 1
-            short_score += 1
-
-        if atr_rising:
-            long_score += 1
-            short_score += 1
-
-        # ---------------------------------
-        # LONG
-        # ---------------------------------
-
-        if long_score >= threshold:
-
-            entry = current["close"]
-
-            stop = min(
-                current["low"],
-                swing_low
-            )
-
-            risk = entry - stop
-
-            if risk <= 0:
-                continue
-
-            target = (
-                entry +
-                risk * rr
-            )
-
-            result = None
-            exit_price = None
-
-            for j in range(
-                i + 1,
-                min(i + 50, len(df))
-            ):
-
-                future = df.iloc[j]
-
-                if future["low"] <= stop:
-
-                    result = "LOSS"
-                    exit_price = stop
-                    break
-
-                if future["high"] >= target:
-
-                    result = "WIN"
-                    exit_price = target
-                    break
-
-            if result is None:
-                continue
-
-            r = (
-                rr
-                if result == "WIN"
-                else -1
-            )
-
-            trades.append({
-                "Coin": symbol,
-                "Time": current["time"],
-                "Side": "LONG",
-                "Score": long_score,
-                "Entry": entry,
-                "SL": stop,
-                "TP": target,
-                "Exit": exit_price,
-                "Result": result,
-                "R": r,
-                "Volume x": round(
-                    volume_ratio,
-                    2
-                ),
-                "ATR Rising": atr_rising,
-                "FVG": bull_fvg,
-                "Sweep": bull_sweep,
-                "BOS": bull_bos
-            })
-
-        # ---------------------------------
-        # SHORT
-        # ---------------------------------
-
-        if short_score >= threshold:
-
-            entry = current["close"]
-
-            stop = max(
-                current["high"],
-                swing_high
-            )
-
-            risk = stop - entry
-
-            if risk <= 0:
-                continue
-
-            target = (
-                entry -
-                risk * rr
-            )
-
-            result = None
-            exit_price = None
-
-            for j in range(
-                i + 1,
-                min(i + 50, len(df))
-            ):
-
-                future = df.iloc[j]
-
-                if future["high"] >= stop:
-
-                    result = "LOSS"
-                    exit_price = stop
-                    break
-
-                if future["low"] <= target:
-
-                    result = "WIN"
-                    exit_price = target
-                    break
-
-            if result is None:
-                continue
-
-            r = (
-                rr
-                if result == "WIN"
-                else -1
-            )
-
-            trades.append({
-                "Coin": symbol,
-                "Time": current["time"],
-                "Side": "SHORT",
-                "Score": short_score,
-                "Entry": entry,
-                "SL": stop,
-                "TP": target,
-                "Exit": exit_price,
-                "Result": result,
-                "R": r,
-                "Volume x": round(
-                    volume_ratio,
-                    2
-                ),
-                "ATR Rising": atr_rising,
-                "FVG": bear_fvg,
-                "Sweep": bear_sweep,
-                "BOS": bear_bos
-            })
-
+    df = add_atr(swings(df))
+    trades=[]
+    for i in range(80, len(df)-50):
+        hist=df.iloc[:i].copy()
+        cur=df.iloc[i]
+        if len(hist)<60: continue
+
+        # Regime and MTF proxies from historical data.
+        def tr(x):
+            if len(x)<30:return "MIXED"
+            c=x["close"]; e9=c.ewm(span=9,adjust=False).mean(); e21=c.ewm(span=21,adjust=False).mean()
+            return "BULL" if c.iloc[-1]>e9.iloc[-1]>e21.iloc[-1] else "BEAR" if c.iloc[-1]<e9.iloc[-1]<e21.iloc[-1] else "MIXED"
+        t5=tr(hist.iloc[-60:])
+        t15=tr(hist.iloc[::3].iloc[-60:])
+        t1=tr(hist.iloc[::12].iloc[-60:])
+        bulls=[t5,t15,t1].count("BULL"); bears=[t5,t15,t1].count("BEAR")
+        if bulls==3: mtf_long=True; mtf_short=False
+        elif bears==3: mtf_short=True; mtf_long=False
+        else: mtf_long=mtf_short=False
+
+        sw=hist
+        sh=sw.loc[sw["SwingHigh"],"high"]; sl=sw.loc[sw["SwingLow"],"low"]
+        if sh.empty or sl.empty: continue
+        ph,pl=sh.iloc[-1],sl.iloc[-1]
+        bull_sweep=cur["low"]<pl and cur["close"]>pl
+        bear_sweep=cur["high"]>ph and cur["close"]<ph
+        ph8=hist["high"].iloc[-8:].max(); pl8=hist["low"].iloc[-8:].min()
+        bull_bos=cur["close"]>ph8; bear_bos=cur["close"]<pl8
+        bull_fvg=cur["low"]>hist["high"].iloc[-3]
+        bear_fvg=cur["high"]<hist["low"].iloc[-3]
+        av=hist["volume"].iloc[-7:].mean()
+        vx=cur["volume"]/av if av>0 else 0
+        atr_rising=(not pd.isna(cur["ATR"]) and not pd.isna(hist["ATR"].iloc[-7]) and cur["ATR"]>hist["ATR"].iloc[-7]*1.1)
+
+        ls=ss=0
+        if mtf_long: ls+=4
+        if mtf_short: ss+=4
+        if bull_sweep: ls+=2
+        if bear_sweep: ss+=2
+        if bull_bos: ls+=3
+        if bear_bos: ss+=3
+        if bull_fvg: ls+=2
+        if bear_fvg: ss+=2
+        if vx>=2: ls+=2; ss+=2
+        elif vx>=1.3: ls+=1; ss+=1
+        if atr_rising: ls+=1; ss+=1
+
+        def simulate(side, score):
+            if score<threshold:return None
+            entry=float(cur["close"])
+            if side=="LONG":
+                stop=min(float(cur["low"]),float(pl)); risk=entry-stop
+                if risk<=0:return None
+                target=entry+risk*rr
+            else:
+                stop=max(float(cur["high"]),float(ph)); risk=stop-entry
+                if risk<=0:return None
+                target=entry-risk*rr
+            for j in range(i+1,min(i+50,len(df))):
+                f=df.iloc[j]
+                if side=="LONG":
+                    # If both occur in same candle, pessimistically count SL first.
+                    if f["low"]<=stop:return {"Side":side,"Score":score,"Result":"LOSS","R":-1,"Time":cur["time"],"Entry":entry,"SL":stop,"TP":target}
+                    if f["high"]>=target:return {"Side":side,"Score":score,"Result":"WIN","R":rr,"Time":cur["time"],"Entry":entry,"SL":stop,"TP":target}
+                else:
+                    if f["high"]>=stop:return {"Side":side,"Score":score,"Result":"LOSS","R":-1,"Time":cur["time"],"Entry":entry,"SL":stop,"TP":target}
+                    if f["low"]<=target:return {"Side":side,"Score":score,"Result":"WIN","R":rr,"Time":cur["time"],"Entry":entry,"SL":stop,"TP":target}
+            return None
+        a=simulate("LONG",ls); b=simulate("SHORT",ss)
+        if a and b: trades.append(a if a["Score"]>=b["Score"] else b)
+        elif a: trades.append(a)
+        elif b: trades.append(b)
     return trades
 
-
-# =========================================================
-# LOAD MARKET
-# =========================================================
-
-all_coins = get_all_perpetuals()
-tickers = get_tickers()
-
-if all_coins.empty:
-    st.error("❌ Perpetual contracts load nahi hue.")
+# ---------------- UI ----------------
+coins=get_all_perpetuals(); tickers=get_tickers()
+if coins.empty or tickers.empty:
+    st.error("❌ Market data load nahi hua.")
     st.stop()
+market=coins.merge(tickers,on="Coin",how="left").dropna(subset=["Price"])
+market=market[market["Vol/OI"]>VOL_OI_MIN].sort_values("24H Volume",ascending=False)
 
-if tickers.empty:
-    st.error("❌ Ticker data load nahi hua.")
-    st.stop()
+st.metric("Coins after Vol/OI > 6",len(market))
+mode=st.radio("Mode",["🔥 Live Scanner","📊 Backtest"],horizontal=True)
 
-
-market = all_coins.merge(
-    tickers,
-    on="Coin",
-    how="left"
-)
-
-market = market.dropna(
-    subset=["Price"]
-)
-
-# =========================================================
-# IMPORTANT FILTER
-# 24H VOLUME / OI > 6
-# =========================================================
-
-market = market[
-    market["Vol/OI"] > 6
-].copy()
-
-market = market.sort_values(
-    "24H Volume",
-    ascending=False
-)
-
-
-# =========================================================
-# MODE
-# =========================================================
-
-mode = st.radio(
-    "Mode",
-    [
-        "🔥 Live Scanner",
-        "📊 Backtest"
-    ],
-    horizontal=True
-)
-
-
-# =========================================================
-# LIVE SCANNER
-# =========================================================
-
-if mode == "🔥 Live Scanner":
-
-    st.info(
-        f"24H Volume/OI > 6 filter ke baad "
-        f"{len(market)} coins available hain."
-    )
-
-    candidates = market.head(
-        DEEP_SCAN_LIMIT
-    )
-
-    results = []
-
-    progress = st.progress(0)
-
-    for i, (_, row) in enumerate(
-        candidates.iterrows()
-    ):
-
-        result = deep_analysis(
-            row["Coin"],
-            row
-        )
-
-        results.append(result)
-
-        progress.progress(
-            int(
-                ((i + 1) /
-                 len(candidates)) * 100
-            )
-        )
-
-    progress.empty()
-
-    signals = pd.DataFrame(results)
-
-    if signals.empty:
-
-        st.warning(
-            "Analysis data available nahi hai."
-        )
-
+if mode=="🔥 Live Scanner":
+    candidates=market.head(DEEP_SCAN_LIMIT)
+    st.info(f"Sirf Vol/OI > 6 wale top {len(candidates)} active coins deep scan honge.")
+    results=[]; bar=st.progress(0)
+    for i,(_,row) in enumerate(candidates.iterrows()):
+        r=deep_analysis(row["Coin"],row)
+        if r: results.append(r)
+        bar.progress(int((i+1)/len(candidates)*100))
+    bar.empty()
+    sig=pd.DataFrame(results)
+    if sig.empty:
+        st.warning("Signal data nahi mila.")
     else:
-
-        signals = signals.sort_values(
-            "Score",
-            ascending=False
-        )
-
-        st.subheader(
-            "🎯 Scanner Results"
-        )
-
-        st.dataframe(
-            signals,
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.subheader(
-            "🟢 LONG"
-        )
-
-        st.dataframe(
-            signals[
-                [
-                    "Coin",
-                    "Price",
-                    "Market State",
-                    "1H Trend",
-                    "15m Liquidity",
-                    "5m BOS",
-                    "FVG",
-                    "ATR Direction",
-                    "Volume x",
-                    "OI Change %",
-                    "Funding %",
-                    "Long Score",
-                    "Long Signal",
-                    "Long Reason"
-                ]
-            ].sort_values(
-                "Long Score",
-                ascending=False
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.subheader(
-            "🔴 SHORT"
-        )
-
-        st.dataframe(
-            signals[
-                [
-                    "Coin",
-                    "Price",
-                    "Market State",
-                    "1H Trend",
-                    "15m Liquidity",
-                    "5m BOS",
-                    "FVG",
-                    "ATR Direction",
-                    "Volume x",
-                    "OI Change %",
-                    "Funding %",
-                    "Short Score",
-                    "Short Signal",
-                    "Short Reason"
-                ]
-            ].sort_values(
-                "Short Score",
-                ascending=False
-            ),
-            use_container_width=True,
-            hide_index=True
-        )
-
-        st.subheader(
-            "🔥 STRONG 8+"
-        )
-
-        strong = signals[
-            signals["Score"] >= 8
-        ]
-
-        if strong.empty:
-
-            st.info(
-                "Abhi 8+ score ka setup nahi mila."
-            )
-
-        else:
-
-            st.dataframe(
-                strong[
-                    [
-                        "Coin",
-                        "Price",
-                        "Market State",
-                        "Score",
-                        "Signal",
-                        "FVG",
-                        "ATR Direction",
-                        "Volume x",
-                        "OI Change %",
-                        "Funding %",
-                        "Reason"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-# =========================================================
-# BACKTEST
-# =========================================================
+        st.subheader("🎯 Complete Scanner")
+        st.dataframe(sig.sort_values("Score",ascending=False),use_container_width=True,hide_index=True)
+        st.subheader("🟢 LONG")
+        st.dataframe(sig[["Coin","Price","MTF","5D Regime","Support","Resistance","Liquidity","BOS","CHOCH","FVG","ATR Direction","Volume x","OI Change %","Funding %","Long Score","Long Reason"]].sort_values("Long Score",ascending=False),use_container_width=True,hide_index=True)
+        st.subheader("🔴 SHORT")
+        st.dataframe(sig[["Coin","Price","MTF","5D Regime","Support","Resistance","Liquidity","BOS","CHOCH","FVG","ATR Direction","Volume x","OI Change %","Funding %","Short Score","Short Reason"]].sort_values("Short Score",ascending=False),use_container_width=True,hide_index=True)
+        strong=sig[(sig["Score"]>=8)&(~sig["Signal"].str.contains("CONFLICT",na=False))]
+        st.subheader("🔥 STRONG 8+")
+        st.dataframe(strong,use_container_width=True,hide_index=True) if not strong.empty else st.info("Abhi 8+ aligned setup nahi mila.")
 
 else:
-
-    st.subheader(
-        "📊 Historical Backtest"
-    )
-
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        days = st.slider(
-            "Historical days",
-            2,
-            30,
-            7
-        )
-
-    with c2:
-        rr = st.selectbox(
-            "Risk : Reward",
-            [1.0, 1.5, 2.0, 2.5, 3.0],
-            index=2
-        )
-
-    with c3:
-        score_threshold = st.selectbox(
-            "Minimum Score",
-            [6, 7, 8, 9, 10],
-            index=2
-        )
-
-    coin_limit = st.slider(
-        "Coins to backtest",
-        1,
-        min(20, len(market))
-        if len(market) > 0 else 1,
-        min(10, len(market))
-        if len(market) > 0 else 1
-    )
-
-    backtest_coins = market.head(
-        coin_limit
-    )
-
-    st.info(
-        f"Backtest mein sirf un coins ko liya "
-        f"ja raha hai jinka current 24H Volume/OI > 6 hai. "
-        f"Coins: {len(backtest_coins)}"
-    )
-
-    if st.button(
-        "▶️ Run Backtest"
-    ):
-
-        all_trades = []
-
-        progress = st.progress(0)
-
-        total = len(backtest_coins)
-
-        for i, (_, row) in enumerate(
-            backtest_coins.iterrows()
-        ):
-
-            trades = backtest_symbol(
-                row["Coin"],
-                days=days,
-                rr=rr,
-                threshold=score_threshold
-            )
-
-            all_trades.extend(trades)
-
-            progress.progress(
-                int(
-                    ((i + 1) /
-                     total) * 100
-                )
-            )
-
-        progress.empty()
-
-        if not all_trades:
-
-            st.warning(
-                "Selected conditions par "
-                "historical trades nahi mile."
-            )
-
+    st.subheader("📊 Historical Backtest")
+    c1,c2,c3=st.columns(3)
+    with c1: days=st.slider("Days",2,30,7)
+    with c2: rr=st.selectbox("Risk : Reward",[1.0,1.5,2.0,2.5,3.0],index=2)
+    with c3: threshold=st.selectbox("Minimum Score",[6,7,8,9,10],index=2)
+    limit=st.slider("Coins",1,min(15,len(market)) if len(market) else 1,min(10,len(market)) if len(market) else 1)
+    if st.button("▶️ Run Backtest"):
+        trades=[]
+        bar=st.progress(0)
+        for i,(_,row) in enumerate(market.head(limit).iterrows()):
+            trades.extend(backtest_symbol(row["Coin"],days,rr,threshold))
+            bar.progress(int((i+1)/limit*100))
+        bar.empty()
+        if not trades:
+            st.warning("Historical trades nahi mile.")
         else:
-
-            bt = pd.DataFrame(
-                all_trades
-            )
-
-            # --------------------------------
-            # METRICS
-            # --------------------------------
-
-            total_trades = len(bt)
-
-            wins = (
-                bt["Result"] == "WIN"
-            ).sum()
-
-            losses = (
-                bt["Result"] == "LOSS"
-            ).sum()
-
-            win_rate = (
-                wins /
-                total_trades *
-                100
-            )
-
-            total_r = bt["R"].sum()
-
-            gross_profit = bt.loc[
-                bt["R"] > 0,
-                "R"
-            ].sum()
-
-            gross_loss = abs(
-                bt.loc[
-                    bt["R"] < 0,
-                    "R"
-                ].sum()
-            )
-
-            if gross_loss > 0:
-                profit_factor = (
-                    gross_profit /
-                    gross_loss
-                )
-            else:
-                profit_factor = np.inf
-
-            avg_r = bt["R"].mean()
-
-            # --------------------------------
-            # DRAWDOWN
-            # --------------------------------
-
-            equity = bt["R"].cumsum()
-
-            peak = equity.cummax()
-
-            drawdown = equity - peak
-
-            max_drawdown = drawdown.min()
-
-            # --------------------------------
-            # METRICS UI
-            # --------------------------------
-
-            m1, m2, m3, m4, m5 = st.columns(5)
-
-            with m1:
-                st.metric(
-                    "Trades",
-                    total_trades
-                )
-
-            with m2:
-                st.metric(
-                    "Win Rate",
-                    f"{win_rate:.2f}%"
-                )
-
-            with m3:
-                st.metric(
-                    "Total R",
-                    f"{total_r:.2f}"
-                )
-
-            with m4:
-                st.metric(
-                    "Profit Factor",
-                    (
-                        "∞"
-                        if np.isinf(profit_factor)
-                        else f"{profit_factor:.2f}"
-                    )
-                )
-
-            with m5:
-                st.metric(
-                    "Max Drawdown",
-                    f"{max_drawdown:.2f} R"
-                )
-
-            # --------------------------------
-            # SCORE ANALYSIS
-            # --------------------------------
-
-            st.subheader(
-                "🎯 Score-wise Performance"
-            )
-
-            score_stats = (
-                bt.groupby("Score")
-                .agg(
-                    Trades=("Result", "count"),
-                    Wins=("Result",
-                          lambda x:
-                          (x == "WIN").sum()),
-                    Total_R=("R", "sum"),
-                    Avg_R=("R", "mean")
-                )
-                .reset_index()
-            )
-
-            score_stats["Win %"] = (
-                score_stats["Wins"] /
-                score_stats["Trades"] *
-                100
-            )
-
-            st.dataframe(
-                score_stats,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # --------------------------------
-            # LONG / SHORT
-            # --------------------------------
-
-            st.subheader(
-                "🟢 LONG vs 🔴 SHORT"
-            )
-
-            side_stats = (
-                bt.groupby("Side")
-                .agg(
-                    Trades=("Result", "count"),
-                    Wins=("Result",
-                          lambda x:
-                          (x == "WIN").sum()),
-                    Total_R=("R", "sum"),
-                    Avg_R=("R", "mean")
-                )
-                .reset_index()
-            )
-
-            side_stats["Win %"] = (
-                side_stats["Wins"] /
-                side_stats["Trades"] *
-                100
-            )
-
-            st.dataframe(
-                side_stats,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            # --------------------------------
-            # CONDITION ANALYSIS
-            # --------------------------------
-
-            st.subheader(
-                "🔬 Condition Performance"
-            )
-
-            condition_rows = []
-
-            for condition in [
-                "FVG",
-                "Sweep",
-                "BOS",
-                "ATR Rising"
-            ]:
-
-                yes = bt[
-                    bt[condition] == True
-                ]
-
-                if len(yes) == 0:
-                    continue
-
-                condition_rows.append({
-                    "Condition": condition,
-                    "Trades": len(yes),
-                    "Win %":
-                        (
-                            (yes["Result"] == "WIN")
-                            .mean() * 100
-                        ),
-                    "Total R":
-                        yes["R"].sum(),
-                    "Avg R":
-                        yes["R"].mean()
-                })
-
-            condition_stats = pd.DataFrame(
-                condition_rows
-            )
-
-            if not condition_stats.empty:
-
-                st.dataframe(
-                    condition_stats,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            # --------------------------------
-            # EQUITY CURVE
-            # --------------------------------
-
-            st.subheader(
-                "📈 Backtest Equity Curve"
-            )
-
-            equity_df = pd.DataFrame({
-                "Trade": range(
-                    1,
-                    len(equity) + 1
-                ),
-                "R": equity.values
-            })
-
-            st.line_chart(
-                equity_df.set_index("Trade")
-            )
-
-            # --------------------------------
-            # TRADES
-            # --------------------------------
-
-            st.subheader(
-                "📋 Trade Log"
-            )
-
-            st.dataframe(
-                bt.sort_values(
-                    "Time",
-                    ascending=False
-                ),
-                use_container_width=True,
-                hide_index=True
-            )
-
-
-# =========================================================
-# EXPLANATION
-# =========================================================
+            bt=pd.DataFrame(trades)
+            wins=(bt["Result"]=="WIN").sum(); total=len(bt)
+            wr=wins/total*100
+            total_r=bt["R"].sum()
+            gp=bt.loc[bt["R"]>0,"R"].sum(); gl=abs(bt.loc[bt["R"]<0,"R"].sum())
+            pf=gp/gl if gl else np.inf
+            eq=bt["R"].cumsum(); dd=eq-eq.cummax()
+            m1,m2,m3,m4,m5=st.columns(5)
+            m1.metric("Trades",total); m2.metric("Win Rate",f"{wr:.2f}%"); m3.metric("Total R",f"{total_r:.2f}")
+            m4.metric("Profit Factor","∞" if np.isinf(pf) else f"{pf:.2f}"); m5.metric("Max DD",f"{dd.min():.2f} R")
+            st.subheader("Score Performance")
+            ss=bt.groupby("Score").agg(Trades=("Result","count"),Wins=("Result",lambda x:(x=="WIN").sum()),Total_R=("R","sum"),Avg_R=("R","mean")).reset_index()
+            ss["Win %"]=ss["Wins"]/ss["Trades"]*100
+            st.dataframe(ss,use_container_width=True,hide_index=True)
+            st.subheader("Side Performance")
+            side=bt.groupby("Side").agg(Trades=("Result","count"),Wins=("Result",lambda x:(x=="WIN").sum()),Total_R=("R","sum"),Avg_R=("R","mean")).reset_index()
+            side["Win %"]=side["Wins"]/side["Trades"]*100
+            st.dataframe(side,use_container_width=True,hide_index=True)
+            st.subheader("📈 Equity Curve")
+            st.line_chart(pd.DataFrame({"R":eq.values}))
+            st.subheader("📋 Trade Log")
+            st.dataframe(bt.sort_values("Time",ascending=False),use_container_width=True,hide_index=True)
 
 st.divider()
+st.write("""
+**Current logic:** Vol/OI > 6 → 5m/15m/1H alignment → 5-day regime → support/resistance → liquidity sweep → BOS/CHOCH → FVG → OI displacement → funding → volume → ATR.
 
-st.subheader(
-    "🧠 Scanner ka current structure"
-)
+**Important:** 8+ score is a screening threshold, not a guaranteed probability. Backtest should be run across multiple coins and periods; avoid judging the strategy from one short sample.
+""")
 
-st.write(
-    """
-LIVE:
-
-24H Volume/OI > 6
-↓
-1H Trend
-↓
-15m Liquidity Sweep
-↓
-Swing High / Low
-↓
-5m BOS
-↓
-FVG
-↓
-OI
-↓
-Funding
-↓
-Volume
-↓
-ATR
-↓
-Market State
-↓
-Long / Short Score
-
-
-BACKTEST:
-
-Historical 5m candles
-↓
-Swing High / Low
-↓
-Liquidity Sweep
-↓
-BOS
-↓
-FVG
-↓
-Volume
-↓
-ATR
-↓
-Score
-↓
-Entry
-↓
-SL
-↓
-TP
-↓
-Win/Loss
-↓
-R
-↓
-Win Rate
-↓
-Profit Factor
-↓
-Drawdown
-"""
-)
-
-st.warning(
-    "⚠️ Backtest historical probability batata hai, "
-    "future result guarantee nahi karta. "
-    "Is version mein current 24H Volume/OI > 6 ko "
-    "candidate filter ke रूप में use kiya gaya hai; "
-    "historical OI/funding ko future-data leak se bachane "
-    "ke liye trade signal mein directly use nahi kiya gaya."
-)
-
-
-# =========================================================
-# REFRESH
-# =========================================================
-
-st.divider()
-
-if st.button(
-    "🔄 Refresh Scanner"
-):
-
+if st.button("🔄 Refresh Scanner"):
     st.cache_data.clear()
     st.rerun()
