@@ -8,55 +8,29 @@ import time
 # ============================================================
 # DELTA EXCHANGE INDIA
 # AUTO MTF / S-R / LEVERAGE SCANNER
-# Version 3.1 - Fixed
+# Clean Mobile-Friendly Version
 # ============================================================
 
 BASE_URL = "https://api.india.delta.exchange"
 
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Delta-Auto-MTF-Scanner/3.1",
+    "User-Agent": "Delta-Auto-MTF-Scanner/4.0",
 }
 
 CACHE_TTL = 30
 L2_CACHE_TTL = 10
 
 
+# ============================================================
+# PAGE
+# ============================================================
+
 st.set_page_config(
     page_title="Delta Auto MTF Scanner",
     page_icon="🔥",
     layout="wide",
 )
-
-
-# ============================================================
-# API
-# ============================================================
-
-def api_get(path, params=None, timeout=15):
-    try:
-        response = requests.get(
-            BASE_URL + path,
-            params=params or {},
-            headers=HEADERS,
-            timeout=timeout,
-        )
-
-        if response.status_code != 200:
-            return None
-
-        data = response.json()
-
-        if not isinstance(data, dict):
-            return None
-
-        if not data.get("success", True):
-            return None
-
-        return data.get("result")
-
-    except Exception:
-        return None
 
 
 # ============================================================
@@ -106,7 +80,37 @@ def fmt(value):
 
 
 # ============================================================
-# LEVERAGE BUCKET
+# API
+# ============================================================
+
+def api_get(path, params=None, timeout=15):
+    try:
+        response = requests.get(
+            BASE_URL + path,
+            params=params or {},
+            headers=HEADERS,
+            timeout=timeout,
+        )
+
+        if response.status_code != 200:
+            return None
+
+        data = response.json()
+
+        if not isinstance(data, dict):
+            return None
+
+        if not data.get("success", True):
+            return None
+
+        return data.get("result")
+
+    except Exception:
+        return None
+
+
+# ============================================================
+# LEVERAGE
 # ============================================================
 
 def leverage_bucket(max_lev):
@@ -144,7 +148,11 @@ def get_products():
         return pd.DataFrame()
 
     if isinstance(result, dict):
-        result = result.get("data") or result.get("products") or []
+        result = (
+            result.get("data")
+            or result.get("products")
+            or []
+        )
 
     if not isinstance(result, list):
         return pd.DataFrame()
@@ -168,15 +176,12 @@ def get_products():
             product.get("trading_status", "")
         ).lower()
 
-        # Keep only perpetual futures
         if contract_type != "perpetual_futures":
             continue
 
-        # Live products only
         if state and state != "live":
             continue
 
-        # Operational products only
         if trading_status and trading_status != "operational":
             continue
 
@@ -216,13 +221,11 @@ def get_products():
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-
-    df = df.drop_duplicates(
-        subset=["Coin"]
-    ).reset_index(drop=True)
-
-    return df
+    return (
+        pd.DataFrame(rows)
+        .drop_duplicates("Coin")
+        .reset_index(drop=True)
+    )
 
 
 # ============================================================
@@ -276,7 +279,6 @@ def get_tickers():
                 "volume",
                 "turnover_24h",
             ],
-            ,
         )
 
         oi = first_number(
@@ -313,19 +315,17 @@ def get_tickers():
 
     df = pd.DataFrame(rows)
 
-    # Ensure numeric
-    for col in [
+    for column in [
         "Price",
         "24H Volume",
         "OI",
         "Funding",
     ]:
-        df[col] = pd.to_numeric(
-            df[col],
+        df[column] = pd.to_numeric(
+            df[column],
             errors="coerce",
         )
 
-    # Vol/OI
     df["Vol/OI"] = (
         df["24H Volume"]
         / df["OI"].replace(0, np.nan)
@@ -340,7 +340,7 @@ def get_tickers():
 
 
 # ============================================================
-# CANDLE RESOLUTIONS
+# CANDLE SETTINGS
 # ============================================================
 
 SECONDS = {
@@ -405,17 +405,16 @@ def get_history(symbol, resolution, candles):
     if df.empty:
         return df
 
-    required = [
+    for column in [
         "open",
         "high",
         "low",
         "close",
-    ]
-
-    for col in required + ["volume"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(
-                df[col],
+        "volume",
+    ]:
+        if column in df.columns:
+            df[column] = pd.to_numeric(
+                df[column],
                 errors="coerce",
             )
 
@@ -426,11 +425,10 @@ def get_history(symbol, resolution, candles):
             errors="coerce",
         )
 
-        # Some APIs return milliseconds.
-        # Convert milliseconds to seconds.
         if (
-            df["time"].dropna().median()
-            > 10_000_000_000
+            df["time"].dropna().size > 0
+            and df["time"].dropna().median()
+            > 10000000000
         ):
             df["time"] = (
                 df["time"] / 1000
@@ -439,12 +437,19 @@ def get_history(symbol, resolution, candles):
         df = df.sort_values("time")
 
         df = df.drop_duplicates(
-            subset=["time"]
+            "time"
         )
 
+    required = [
+        "open",
+        "high",
+        "low",
+        "close",
+    ]
+
     if not all(
-        col in df.columns
-        for col in required
+        column in df.columns
+        for column in required
     ):
         return pd.DataFrame()
 
@@ -458,7 +463,7 @@ def get_history(symbol, resolution, candles):
 
 
 # ============================================================
-# BASIC INDICATORS
+# TREND
 # ============================================================
 
 def trend(df):
@@ -502,33 +507,11 @@ def trend(df):
     return "MIXED"
 
 
-def volume_multiple(df):
-
-    if (
-        df is None
-        or len(df) < 8
-        or "volume" not in df.columns
-    ):
-        return 0.0
-
-    avg = df["volume"].iloc[-7:-1].mean()
-
-    if pd.isna(avg) or avg <= 0:
-        return 0.0
-
-    return float(
-        df["volume"].iloc[-1] / avg
-    )
-
-
 # ============================================================
-# PIVOTS / S-R
+# PIVOTS
 # ============================================================
 
-def find_levels(
-    df,
-    lookback=2,
-):
+def find_levels(df, lookback=2):
 
     if (
         df is None
@@ -544,57 +527,64 @@ def find_levels(
         len(df) - lookback,
     ):
 
-        h = safe_float(
+        high_value = safe_float(
             df["high"].iloc[i]
         )
 
-        l = safe_float(
+        low_value = safe_float(
             df["low"].iloc[i]
         )
 
-        if pd.isna(h) or pd.isna(l):
+        if pd.isna(high_value):
             continue
 
-        left_h = df["high"].iloc[
+        if pd.isna(low_value):
+            continue
+
+        left_high = df["high"].iloc[
             i - lookback:i
         ].max()
 
-        right_h = df["high"].iloc[
+        right_high = df["high"].iloc[
             i + 1:i + lookback + 1
         ].max()
 
-        left_l = df["low"].iloc[
+        left_low = df["low"].iloc[
             i - lookback:i
         ].min()
 
-        right_l = df["low"].iloc[
+        right_low = df["low"].iloc[
             i + 1:i + lookback + 1
         ].min()
 
         if (
-            h >= left_h
-            and h >= right_h
+            high_value >= left_high
+            and high_value >= right_high
         ):
             highs.append(
                 {
                     "index": i,
-                    "price": h,
+                    "price": high_value,
                 }
             )
 
         if (
-            l <= left_l
-            and l <= right_l
+            low_value <= left_low
+            and low_value <= right_low
         ):
             lows.append(
                 {
                     "index": i,
-                    "price": l,
+                    "price": low_value,
                 }
             )
 
     return highs, lows
 
+
+# ============================================================
+# CLUSTER LEVELS
+# ============================================================
 
 def cluster_levels(
     levels,
@@ -609,7 +599,7 @@ def cluster_levels(
     for item in levels:
 
         price = safe_float(
-            item.get("price")
+            item["price"]
         )
 
         if pd.isna(price):
@@ -623,9 +613,8 @@ def cluster_levels(
 
             if (
                 center != 0
-                and abs(
-                    price - center
-                ) / abs(center)
+                and abs(price - center)
+                / abs(center)
                 <= tolerance
             ):
                 found = cluster
@@ -676,10 +665,7 @@ def cluster_levels(
 # CANDLE TIME
 # ============================================================
 
-def candle_time(
-    df,
-    index,
-):
+def candle_time(df, index):
 
     if (
         df is None
@@ -699,12 +685,11 @@ def candle_time(
         )
 
     except Exception:
-
         return str(index)
 
 
 # ============================================================
-# CANDLE DETAILS
+# CANDLE DETAIL
 # ============================================================
 
 def candle_detail(
@@ -753,7 +738,7 @@ def candle_detail(
 
 
 # ============================================================
-# NEAREST S/R
+# AUTOMATIC S/R
 # ============================================================
 
 def nearest_sr(
@@ -761,7 +746,7 @@ def nearest_sr(
     tolerance=0.006,
 ):
 
-    empty_result = {
+    empty = {
         "support": np.nan,
         "resistance": np.nan,
         "major_support": np.nan,
@@ -773,39 +758,39 @@ def nearest_sr(
     }
 
     if df is None or df.empty:
-        return empty_result
+        return empty
 
     current = safe_float(
         df["close"].iloc[-1]
     )
 
-    if pd.isna(current) or current <= 0:
-        return empty_result
+    if pd.isna(current):
+        return empty
 
     highs, lows = find_levels(
         df,
         lookback=2,
     )
 
-    hc = cluster_levels(
+    high_clusters = cluster_levels(
         highs,
         tolerance,
     )
 
-    lc = cluster_levels(
+    low_clusters = cluster_levels(
         lows,
         tolerance,
     )
 
     supports = [
         x
-        for x in lc
+        for x in low_clusters
         if x["price"] < current
     ]
 
     resistances = [
         x
-        for x in hc
+        for x in high_clusters
         if x["price"] > current
     ]
 
@@ -825,7 +810,7 @@ def nearest_sr(
         default=np.nan,
     )
 
-    major_support_item = (
+    major_support = (
         max(
             supports,
             key=lambda x: x["touches"],
@@ -834,7 +819,7 @@ def nearest_sr(
         else None
     )
 
-    major_res_item = (
+    major_resistance = (
         max(
             resistances,
             key=lambda x: x["touches"],
@@ -852,14 +837,14 @@ def nearest_sr(
         ),
     )[:5]:
 
-        for idx in cluster[
+        for index in cluster[
             "indexes"
         ][-5:]:
 
             support_details.append(
                 candle_detail(
                     df,
-                    idx,
+                    index,
                     "SUPPORT",
                     cluster["price"],
                 )
@@ -874,14 +859,14 @@ def nearest_sr(
         ),
     )[:5]:
 
-        for idx in cluster[
+        for index in cluster[
             "indexes"
         ][-5:]:
 
             resistance_details.append(
                 candle_detail(
                     df,
-                    idx,
+                    index,
                     "RESISTANCE",
                     cluster["price"],
                 )
@@ -892,26 +877,26 @@ def nearest_sr(
         "resistance": resistance,
 
         "major_support": (
-            major_support_item["price"]
-            if major_support_item
+            major_support["price"]
+            if major_support
             else np.nan
         ),
 
         "major_resistance": (
-            major_res_item["price"]
-            if major_res_item
+            major_resistance["price"]
+            if major_resistance
             else np.nan
         ),
 
         "support_touches": (
-            major_support_item["touches"]
-            if major_support_item
+            major_support["touches"]
+            if major_support
             else 0
         ),
 
         "resistance_touches": (
-            major_res_item["touches"]
-            if major_res_item
+            major_resistance["touches"]
+            if major_resistance
             else 0
         ),
 
@@ -929,10 +914,8 @@ def nearest_sr(
 
 def repeated_structure(df):
 
-    if (
-        df is None
-        or len(df) < 15
-    ):
+    if df is None or len(df) < 15:
+
         return {
             "pattern": "NONE",
             "count": 0,
@@ -944,146 +927,131 @@ def repeated_structure(df):
         lookback=2,
     )
 
-    hc = cluster_levels(highs)
-    lc = cluster_levels(lows)
+    high_clusters = cluster_levels(
+        highs
+    )
+
+    low_clusters = cluster_levels(
+        lows
+    )
 
     details = []
 
-    # Repeated resistance
-    for cluster in hc:
+    for cluster in high_clusters:
 
         if cluster["touches"] >= 2:
 
-            for idx in cluster[
+            for index in cluster[
                 "indexes"
             ][-5:]:
 
                 details.append(
                     candle_detail(
                         df,
-                        idx,
+                        index,
                         "REPEATED RESISTANCE",
                         cluster["price"],
                     )
                 )
 
-    # Repeated support
-    for cluster in lc:
+    for cluster in low_clusters:
 
         if cluster["touches"] >= 2:
 
-            for idx in cluster[
+            for index in cluster[
                 "indexes"
             ][-5:]:
 
                 details.append(
                     candle_detail(
                         df,
-                        idx,
+                        index,
                         "REPEATED SUPPORT",
                         cluster["price"],
                     )
                 )
 
-    # Higher high
     if len(highs) >= 3:
 
-        rh = highs[-4:]
+        recent_highs = highs[-4:]
 
-        vals = [
+        values = [
             x["price"]
-            for x in rh
+            for x in recent_highs
         ]
 
         if all(
-            vals[i] > vals[i - 1]
+            values[i] > values[i - 1]
             for i in range(
                 1,
-                len(vals),
+                len(values),
             )
         ):
 
             details.append(
                 {
                     "Candle Index":
-                        rh[-1]["index"],
-
+                        recent_highs[-1]["index"],
                     "Candle Time UTC":
                         candle_time(
                             df,
-                            rh[-1]["index"],
+                            recent_highs[-1]["index"],
                         ),
-
                     "Type":
                         "HIGHER-HIGH SEQUENCE",
-
                     "Level":
-                        vals[-1],
-
+                        values[-1],
                     "Open":
                         np.nan,
-
                     "High":
-                        vals[-1],
-
+                        values[-1],
                     "Low":
                         np.nan,
-
                     "Close":
                         np.nan,
-
                     "Volume":
                         np.nan,
                 }
             )
 
-    # Lower low
     if len(lows) >= 3:
 
-        rl = lows[-4:]
+        recent_lows = lows[-4:]
 
-        vals = [
+        values = [
             x["price"]
-            for x in rl
+            for x in recent_lows
         ]
 
         if all(
-            vals[i] < vals[i - 1]
+            values[i] < values[i - 1]
             for i in range(
                 1,
-                len(vals),
+                len(values),
             )
         ):
 
             details.append(
                 {
                     "Candle Index":
-                        rl[-1]["index"],
-
+                        recent_lows[-1]["index"],
                     "Candle Time UTC":
                         candle_time(
                             df,
-                            rl[-1]["index"],
+                            recent_lows[-1]["index"],
                         ),
-
                     "Type":
                         "LOWER-LOW SEQUENCE",
-
                     "Level":
-                        vals[-1],
-
+                        values[-1],
                     "Open":
                         np.nan,
-
                     "High":
                         np.nan,
-
                     "Low":
-                        vals[-1],
-
+                        values[-1],
                     "Close":
                         np.nan,
-
                     "Volume":
                         np.nan,
                 }
@@ -1099,46 +1067,38 @@ def repeated_structure(df):
 
     names = list(
         dict.fromkeys(
-            x["Type"]
-            for x in details
+            item["Type"]
+            for item in details
         )
     )
 
     return {
         "pattern":
             " | ".join(names),
-
         "count":
             len(details),
-
         "details":
             details,
     }
 
 
 # ============================================================
-# BREAKOUT / RETEST / FAILED BREAKOUT
+# BREAKOUT
 # ============================================================
 
 def breakout_status(df):
 
-    if (
-        df is None
-        or len(df) < 8
-    ):
+    if df is None or len(df) < 8:
         return "NONE", np.nan
 
     current = safe_float(
         df["close"].iloc[-1]
     )
 
-    if pd.isna(current):
-        return "NONE", np.nan
-
-    previous_df = df.iloc[:-1]
+    previous = df.iloc[:-1]
 
     highs, lows = find_levels(
-        previous_df,
+        previous,
         lookback=2,
     )
 
@@ -1160,13 +1120,10 @@ def breakout_status(df):
 
     recent = df.tail(5)
 
-    # --------------------------------------------------------
-    # BULLISH
-    # --------------------------------------------------------
-
     if pd.notna(resistance):
 
         if current > resistance:
+
             return (
                 "BULL BREAKOUT",
                 resistance,
@@ -1178,6 +1135,7 @@ def breakout_status(df):
             and recent["close"].iloc[-1]
             < resistance
         ):
+
             return (
                 "FAILED BULL BREAKOUT",
                 resistance,
@@ -1185,26 +1143,27 @@ def breakout_status(df):
 
         if len(recent) >= 2:
 
-            prev = recent.iloc[-2]
-            last = recent.iloc[-1]
+            previous_candle = recent.iloc[-2]
+            last_candle = recent.iloc[-1]
 
             if (
-                prev["close"] > resistance
-                and last["low"] <= resistance
-                and last["close"] > resistance
+                previous_candle["close"]
+                > resistance
+                and last_candle["low"]
+                <= resistance
+                and last_candle["close"]
+                > resistance
             ):
+
                 return (
                     "BULL RETEST HOLD",
                     resistance,
                 )
 
-    # --------------------------------------------------------
-    # BEARISH
-    # --------------------------------------------------------
-
     if pd.notna(support):
 
         if current < support:
+
             return (
                 "BEAR BREAKDOWN",
                 support,
@@ -1216,6 +1175,7 @@ def breakout_status(df):
             and recent["close"].iloc[-1]
             > support
         ):
+
             return (
                 "FAILED BEAR BREAKDOWN",
                 support,
@@ -1223,14 +1183,18 @@ def breakout_status(df):
 
         if len(recent) >= 2:
 
-            prev = recent.iloc[-2]
-            last = recent.iloc[-1]
+            previous_candle = recent.iloc[-2]
+            last_candle = recent.iloc[-1]
 
             if (
-                prev["close"] < support
-                and last["high"] >= support
-                and last["close"] < support
+                previous_candle["close"]
+                < support
+                and last_candle["high"]
+                >= support
+                and last_candle["close"]
+                < support
             ):
+
                 return (
                     "BEAR RETEST FAIL",
                     support,
@@ -1240,7 +1204,7 @@ def breakout_status(df):
 
 
 # ============================================================
-# TIMEFRAME CONFIG
+# TIMEFRAMES
 # ============================================================
 
 TIMEFRAMES = {
@@ -1253,25 +1217,28 @@ TIMEFRAMES = {
 
 
 # ============================================================
-# AUTO MTF ANALYSIS
+# MTF ANALYSIS
 # ============================================================
 
 def timeframe_analysis(symbol):
 
     output = {}
 
-    for name, (
-        resolution,
-        candles,
-    ) in TIMEFRAMES.items():
+    for name, config in TIMEFRAMES.items():
+
+        resolution = config[0]
+        candles = config[1]
 
         try:
+
             df = get_history(
                 symbol,
                 resolution,
                 candles,
             )
+
         except Exception:
+
             df = pd.DataFrame()
 
         if (
@@ -1299,12 +1266,15 @@ def timeframe_analysis(symbol):
 
         sr = nearest_sr(df)
 
-        rep = repeated_structure(df)
+        repeated = repeated_structure(df)
 
-        bo, bo_level = breakout_status(df)
+        breakout, break_level = (
+            breakout_status(df)
+        )
 
         output[name] = {
-            "trend": trend(df),
+            "trend":
+                trend(df),
 
             "support":
                 sr["support"],
@@ -1325,22 +1295,22 @@ def timeframe_analysis(symbol):
                 sr["resistance_touches"],
 
             "pattern":
-                rep["pattern"],
+                repeated["pattern"],
 
             "repeats":
-                rep["count"],
+                repeated["count"],
 
             "breakout":
-                bo,
+                breakout,
 
             "break_level":
-                bo_level,
+                break_level,
 
             "details":
                 (
                     sr["support_details"]
                     + sr["resistance_details"]
-                    + rep["details"]
+                    + repeated["details"]
                 ),
 
             "candles":
@@ -1367,21 +1337,20 @@ def mtf_score(
 
     sr_rows = []
 
-    for tf, data in analysis.items():
+    for timeframe, data in analysis.items():
 
-        tr = data["trend"]
+        current_trend = data["trend"]
 
-        if tr == "BULL":
+        if current_trend == "BULL":
 
             bullish_tfs += 1
             long_score += 2
 
-        elif tr == "BEAR":
+        elif current_trend == "BEAR":
 
             bearish_tfs += 1
             short_score += 2
 
-        # Support proximity
         if pd.notna(
             data["support"]
         ):
@@ -1398,7 +1367,6 @@ def mtf_score(
             if distance <= 3:
                 long_score += 1
 
-        # Resistance proximity
         if pd.notna(
             data["resistance"]
         ):
@@ -1415,33 +1383,36 @@ def mtf_score(
             if distance <= 3:
                 short_score += 1
 
-        # Repeated support
         if data[
             "support_touches"
         ] >= 3:
+
             long_score += 1
 
-        # Repeated resistance
         if data[
             "resistance_touches"
         ] >= 3:
+
             short_score += 1
 
-        # Breakout / breakdown
         if "BULL" in data[
             "breakout"
         ]:
+
             long_score += 3
 
         if "BEAR" in data[
             "breakout"
         ]:
+
             short_score += 3
 
         sr_rows.append(
             {
-                "Timeframe": tf,
-                "Trend": tr,
+                "Timeframe":
+                    timeframe,
+                "Trend":
+                    current_trend,
                 "Support":
                     data["support"],
                 "Resistance":
@@ -1484,26 +1455,22 @@ def mtf_score(
     return {
         "long_score":
             long_score,
-
         "short_score":
             short_score,
-
         "score":
             max(
                 long_score,
                 short_score,
             ),
-
         "bias":
             bias,
-
         "sr_rows":
             sr_rows,
     }
 
 
 # ============================================================
-# AUTO SCAN ROW
+# SCAN ROW
 # ============================================================
 
 def auto_scan_row(row):
@@ -1531,7 +1498,7 @@ def auto_scan_row(row):
     patterns = []
     breakouts = []
 
-    for tf, data in analysis.items():
+    for timeframe, data in analysis.items():
 
         if data["pattern"] not in (
             "NONE",
@@ -1539,7 +1506,7 @@ def auto_scan_row(row):
         ):
 
             patterns.append(
-                tf
+                timeframe
                 + ": "
                 + data["pattern"]
             )
@@ -1550,7 +1517,7 @@ def auto_scan_row(row):
         ):
 
             breakouts.append(
-                tf
+                timeframe
                 + ": "
                 + data["breakout"]
             )
@@ -1558,14 +1525,15 @@ def auto_scan_row(row):
     supports = []
     resistances = []
 
-    for tf, data in analysis.items():
+    for timeframe, data in analysis.items():
 
         if pd.notna(
             data["support"]
         ):
+
             supports.append(
                 (
-                    tf,
+                    timeframe,
                     data["support"],
                 )
             )
@@ -1573,9 +1541,10 @@ def auto_scan_row(row):
         if pd.notna(
             data["resistance"]
         ):
+
             resistances.append(
                 (
-                    tf,
+                    timeframe,
                     data["resistance"],
                 )
             )
@@ -1724,7 +1693,7 @@ def auto_scan_row(row):
 
 
 # ============================================================
-# OPTIONAL L2
+# ORDER BOOK
 # ============================================================
 
 @st.cache_data(ttl=L2_CACHE_TTL)
@@ -1857,26 +1826,28 @@ def orderbook_stats(
     if not bid or not ask:
         return None
 
-    bid = pd.DataFrame(
-        bid
-    ).sort_values(
-        "Price",
-        ascending=False,
+    bid_df = (
+        pd.DataFrame(bid)
+        .sort_values(
+            "Price",
+            ascending=False,
+        )
     )
 
-    ask = pd.DataFrame(
-        ask
-    ).sort_values(
-        "Price",
-        ascending=True,
+    ask_df = (
+        pd.DataFrame(ask)
+        .sort_values(
+            "Price",
+            ascending=True,
+        )
     )
 
     bid_depth = float(
-        bid["Size"].sum()
+        bid_df["Size"].sum()
     )
 
     ask_depth = float(
-        ask["Size"].sum()
+        ask_df["Size"].sum()
     )
 
     total = (
@@ -1888,22 +1859,24 @@ def orderbook_stats(
         (bid_depth - ask_depth)
         / total
         * 100
-        if total
-        else 0.0
+        if total > 0
+        else 0
     )
 
     return {
-        "bid": bid,
-        "ask": ask,
+        "bid": bid_df,
+        "ask": ask_df,
         "bid_depth": bid_depth,
         "ask_depth": ask_depth,
         "imbalance": imbalance,
-        "best_bid": float(
-            bid["Price"].max()
-        ),
-        "best_ask": float(
-            ask["Price"].min()
-        ),
+        "best_bid":
+            float(
+                bid_df["Price"].max()
+            ),
+        "best_ask":
+            float(
+                ask_df["Price"].min()
+            ),
     }
 
 
@@ -1914,30 +1887,31 @@ def orderbook_stats(
 products = get_products()
 tickers = get_tickers()
 
-
 if products.empty:
+
     st.error(
-        "❌ Delta products data load nahi hua."
+        "❌ Delta Products API se data nahi mila."
     )
+
     st.info(
-        "API response check karein ya Refresh All dabayein."
+        "Refresh All dabakar dobara try karein."
     )
+
     st.stop()
 
 
 if tickers.empty:
+
     st.error(
-        "❌ Delta ticker data load nahi hua."
+        "❌ Delta Tickers API se data nahi mila."
     )
+
     st.info(
-        "API response check karein ya Refresh All dabayein."
+        "Refresh All dabakar dobara try karein."
     )
+
     st.stop()
 
-
-# ============================================================
-# MERGE
-# ============================================================
 
 market = products.merge(
     tickers,
@@ -1945,11 +1919,12 @@ market = products.merge(
     how="inner",
 )
 
-
 if market.empty:
+
     st.error(
-        "❌ Products aur tickers merge hone ke baad market empty hai."
+        "❌ Products aur tickers merge ke baad market empty hai."
     )
+
     st.stop()
 
 
@@ -1959,8 +1934,9 @@ market = market.dropna(
 
 
 # ============================================================
-# IMPORTANT FIX
-# CREATE LEVERAGE BUCKET HERE
+# IMPORTANT:
+# LEVERAGE BUCKET IS CREATED HERE
+# BEFORE ELIGIBLE / TABLES
 # ============================================================
 
 market["Leverage Bucket"] = (
@@ -1970,8 +1946,11 @@ market["Leverage Bucket"] = (
 )
 
 
-# Make sure important columns always exist
-required_market_columns = [
+# ============================================================
+# GUARANTEE REQUIRED COLUMNS
+# ============================================================
+
+required_columns = [
     "Coin",
     "Price",
     "24H Volume",
@@ -1983,20 +1962,16 @@ required_market_columns = [
     "Funding",
 ]
 
-
-for column in required_market_columns:
+for column in required_columns:
 
     if column not in market.columns:
-
         market[column] = np.nan
 
 
 market = market.sort_values(
     "24H Volume",
     ascending=False,
-).reset_index(
-    drop=True
-)
+).reset_index(drop=True)
 
 
 # ============================================================
@@ -2008,9 +1983,9 @@ st.title(
 )
 
 st.caption(
-    "All live perpetuals → Vol/OI filter → "
-    "leverage buckets → automatic 6H/12H/1D/1W/1M "
-    "S/R → repeated structure → breakout/retest"
+    "Live Perpetuals → Vol/OI → Leverage → "
+    "6H / 12H / 1D / 1W / 1M S/R → "
+    "Repeated Structure → Breakout / Retest"
 )
 
 
@@ -2045,20 +2020,15 @@ with st.sidebar:
     )
 
     scan_count = st.slider(
-        "Automatic deep S/R scan",
+        "Deep MTF Scan Coins",
         min_value=5,
         max_value=max_scan,
         value=default_scan,
         step=5,
-        help=(
-            "All eligible coins table mein rahenge. "
-            "Deep MTF analysis API load control ke liye "
-            "top N eligible coins par chalega."
-        ),
     )
 
     depth = st.slider(
-        "L2 depth",
+        "L2 Depth",
         min_value=5,
         max_value=50,
         value=15,
@@ -2070,7 +2040,6 @@ with st.sidebar:
     ):
 
         st.cache_data.clear()
-
         st.rerun()
 
 
@@ -2104,40 +2073,40 @@ c2.metric(
     len(eligible),
 )
 
-known_lev = market[
-    "Max Leverage"
-].dropna()
+known_leverage = (
+    market["Max Leverage"]
+    .dropna()
+)
 
 c3.metric(
     "Known Leverage",
-    len(known_lev),
+    len(known_leverage),
 )
 
-max_vol_oi = market[
+highest_vol_oi = market[
     "Vol/OI"
 ].max()
 
 c4.metric(
     "Highest Vol/OI",
     round(
-        float(max_vol_oi),
+        float(highest_vol_oi),
         2,
     )
-    if pd.notna(max_vol_oi)
+    if pd.notna(highest_vol_oi)
     else 0,
 )
 
 
 # ============================================================
-# ALL ELIGIBLE MARKET TABLE
+# MARKET TABLE
 # ============================================================
 
 st.subheader(
     "📋 All Eligible Coins"
 )
 
-
-market_cols = [
+market_columns = [
     "Coin",
     "Price",
     "24H Volume",
@@ -2149,37 +2118,9 @@ market_cols = [
     "Funding",
 ]
 
-
-# Final safety check
-missing_cols = [
-    column
-    for column in market_cols
-    if column not in eligible.columns
-]
-
-
-if missing_cols:
-
-    st.error(
-        "Market table ke columns missing hain: "
-        + ", ".join(missing_cols)
-    )
-
-    st.write(
-        "Available columns:"
-    )
-
-    st.write(
-        list(eligible.columns)
-    )
-
-    st.stop()
-
-
 market_view = eligible[
-    market_cols
+    market_columns
 ].copy()
-
 
 st.dataframe(
     market_view.head(300),
@@ -2196,19 +2137,17 @@ st.subheader(
     "⚡ Leverage-wise Tables"
 )
 
-
-lev_tabs = st.tabs(
+leverage_tabs = st.tabs(
     [
         "≤10x",
         ">10x–20x",
         ">20x–50x",
         ">50x",
-        "Leverage N/A",
+        "N/A",
     ]
 )
 
-
-buckets = [
+leverage_buckets = [
     "≤10x",
     ">10x–20x",
     ">20x–50x",
@@ -2216,29 +2155,25 @@ buckets = [
     "Leverage N/A",
 ]
 
-
 for tab, bucket in zip(
-    lev_tabs,
-    buckets,
+    leverage_tabs,
+    leverage_buckets,
 ):
 
     with tab:
 
-        bucket_df = eligible[
-            eligible[
-                "Leverage Bucket"
-            ] == bucket
-        ][
-            market_cols
-        ].copy()
+        bucket_data = eligible[
+            eligible["Leverage Bucket"]
+            == bucket
+        ][market_columns]
 
         st.write(
             f"{bucket}: "
-            f"{len(bucket_df)} coins"
+            f"{len(bucket_data)} coins"
         )
 
         st.dataframe(
-            bucket_df.head(300),
+            bucket_data.head(300),
             use_container_width=True,
             hide_index=True,
         )
@@ -2261,7 +2196,7 @@ mode = st.radio(
 
 
 # ============================================================
-# AUTO SCANNER
+# AUTO MTF SCANNER
 # ============================================================
 
 if mode == "🔥 AUTO MTF SCANNER":
@@ -2291,9 +2226,8 @@ if mode == "🔥 AUTO MTF SCANNER":
     )
 
     st.info(
-        f"{len(candidates)} eligible coins ka "
-        "automatic 6H/12H/1D/1W/1M S/R scan chalega. "
-        "20x+ leverage coins filter se remove nahi kiye gaye hain."
+        f"{len(candidates)} coins ka "
+        "automatic MTF analysis chalega."
     )
 
     results = []
@@ -2311,8 +2245,12 @@ if mode == "🔥 AUTO MTF SCANNER":
 
         try:
 
+            result = auto_scan_row(
+                row
+            )
+
             results.append(
-                auto_scan_row(row)
+                result
             )
 
         except Exception:
@@ -2331,7 +2269,7 @@ if mode == "🔥 AUTO MTF SCANNER":
     if not results:
 
         st.warning(
-            "Automatic scan ke liye enough candle data nahi mila."
+            "Candle data se automatic scan result nahi mila."
         )
 
         st.stop()
@@ -2340,7 +2278,7 @@ if mode == "🔥 AUTO MTF SCANNER":
         results
     )
 
-    display_cols = [
+    display_columns = [
         "Coin",
         "Price",
         "Vol/OI",
@@ -2357,11 +2295,6 @@ if mode == "🔥 AUTO MTF SCANNER":
         "Signal",
     ]
 
-    for column in display_cols:
-
-        if column not in scan_df.columns:
-            scan_df[column] = np.nan
-
     scan_df = scan_df.sort_values(
         [
             "MTF Score",
@@ -2372,15 +2305,11 @@ if mode == "🔥 AUTO MTF SCANNER":
 
     st.dataframe(
         scan_df[
-            display_cols
+            display_columns
         ],
         use_container_width=True,
         hide_index=True,
     )
-
-    # --------------------------------------------------------
-    # LONG WATCH
-    # --------------------------------------------------------
 
     st.subheader(
         "🟢 Long Watch"
@@ -2399,15 +2328,11 @@ if mode == "🔥 AUTO MTF SCANNER":
 
     st.dataframe(
         long_df[
-            display_cols
+            display_columns
         ].head(30),
         use_container_width=True,
         hide_index=True,
     )
-
-    # --------------------------------------------------------
-    # SHORT WATCH
-    # --------------------------------------------------------
 
     st.subheader(
         "🔴 Short Watch"
@@ -2426,7 +2351,7 @@ if mode == "🔥 AUTO MTF SCANNER":
 
     st.dataframe(
         short_df[
-            display_cols
+            display_columns
         ].head(30),
         use_container_width=True,
         hide_index=True,
@@ -2444,7 +2369,7 @@ if mode == "🔥 AUTO MTF SCANNER":
 elif mode == "📐 AUTO S/R DETAILS":
 
     st.subheader(
-        "📐 Automatic Multi-Timeframe Support / Resistance"
+        "📐 Automatic Multi-Timeframe S/R"
     )
 
     if eligible.empty:
@@ -2467,9 +2392,7 @@ elif mode == "📐 AUTO S/R DETAILS":
     )
 
     coin_list = (
-        ranked[
-            "Coin"
-        ]
+        ranked["Coin"]
         .head(scan_count)
         .tolist()
     )
@@ -2477,7 +2400,7 @@ elif mode == "📐 AUTO S/R DETAILS":
     if not coin_list:
 
         st.warning(
-            "No coins available."
+            "Coins available nahi hain."
         )
 
         st.stop()
@@ -2485,10 +2408,6 @@ elif mode == "📐 AUTO S/R DETAILS":
     symbol = st.selectbox(
         "Coin",
         coin_list,
-        help=(
-            "List automatically Vol/OI "
-            "ke basis par ban rahi hai."
-        ),
     )
 
     if st.button(
@@ -2499,12 +2418,12 @@ elif mode == "📐 AUTO S/R DETAILS":
             symbol
         )
 
-        price_series = ranked.loc[
+        price_values = ranked.loc[
             ranked["Coin"] == symbol,
             "Price",
         ]
 
-        if price_series.empty:
+        if price_values.empty:
 
             st.error(
                 "Price data nahi mila."
@@ -2513,7 +2432,7 @@ elif mode == "📐 AUTO S/R DETAILS":
             st.stop()
 
         price = safe_float(
-            price_series.iloc[0]
+            price_values.iloc[0]
         )
 
         st.metric(
@@ -2523,11 +2442,12 @@ elif mode == "📐 AUTO S/R DETAILS":
 
         rows = []
 
-        for tf, data in analysis.items():
+        for timeframe, data in analysis.items():
 
             rows.append(
                 {
-                    "Timeframe": tf,
+                    "Timeframe":
+                        timeframe,
                     "Trend":
                         data["trend"],
                     "Support":
@@ -2542,7 +2462,7 @@ elif mode == "📐 AUTO S/R DETAILS":
                         data["support_touches"],
                     "R Touches":
                         data["resistance_touches"],
-                    "Repeated Structure":
+                    "Structure":
                         data["pattern"],
                     "Breakout / Retest":
                         data["breakout"],
@@ -2559,10 +2479,10 @@ elif mode == "📐 AUTO S/R DETAILS":
             "### 🧱 Detected S/R Candle Details"
         )
 
-        for tf, data in analysis.items():
+        for timeframe, data in analysis.items():
 
             st.markdown(
-                f"#### {tf}"
+                f"#### {timeframe}"
             )
 
             details = data[
@@ -2572,7 +2492,7 @@ elif mode == "📐 AUTO S/R DETAILS":
             if not details:
 
                 st.caption(
-                    "Is timeframe par strong level detail nahi mila."
+                    "Strong level detail nahi mila."
                 )
 
                 continue
@@ -2608,7 +2528,7 @@ elif mode == "📐 AUTO S/R DETAILS":
 elif mode == "🔁 REPEATED STRUCTURE":
 
     st.subheader(
-        "🔁 Automatic Repeated Resistance / Support"
+        "🔁 Repeated Support / Resistance"
     )
 
     if eligible.empty:
@@ -2653,7 +2573,7 @@ elif mode == "🔁 REPEATED STRUCTURE":
                 symbol
             )
 
-            for tf, data in analysis.items():
+            for timeframe, data in analysis.items():
 
                 if data[
                     "pattern"
@@ -2666,28 +2586,20 @@ elif mode == "🔁 REPEATED STRUCTURE":
                         {
                             "Coin":
                                 symbol,
-
                             "Vol/OI":
                                 row["Vol/OI"],
-
                             "Max Leverage":
                                 row["Max Leverage"],
-
                             "Timeframe":
-                                tf,
-
+                                timeframe,
                             "Trend":
                                 data["trend"],
-
                             "Pattern":
                                 data["pattern"],
-
                             "Repeat Count":
                                 data["repeats"],
-
                             "Support":
                                 data["support"],
-
                             "Resistance":
                                 data["resistance"],
                         }
@@ -2707,4 +2619,9 @@ elif mode == "🔁 REPEATED STRUCTURE":
 
                         detail[
                             "Timeframe"
-                       
+                        ] = timeframe
+
+                        detail[
+                            "Vol/OI"
+                        ] = row[
+                            "
