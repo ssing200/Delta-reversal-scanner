@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="Delta Scanner", page_icon="🔥", layout="wide")
-st.title("🔥 Delta Reversal Scanner (Simple)")
+st.title("🔥 Delta Reversal Scanner")
 
 BASE_URL = "https://api.india.delta.exchange"
 HEADERS = {"Accept": "application/json"}
@@ -24,7 +24,6 @@ def api_get(path, params=None):
 def load_market():
     products = api_get("/v2/products", {"contract_types": "perpetual_futures"})
     tickers = api_get("/v2/tickers", {"contract_types": "perpetual_futures"})
-    
     if not products or not tickers:
         return pd.DataFrame()
     
@@ -59,6 +58,7 @@ def load_market():
             price = float(t.get("close") or t.get("mark_price") or 0)
             volume = float(t.get("volume_24h") or 0)
             oi = float(t.get("open_interest") or 0)
+            funding = float(t.get("funding_rate") or 0)
         except:
             continue
         if price <= 0:
@@ -68,55 +68,24 @@ def load_market():
             "Price": price,
             "24H Volume": volume,
             "OI": oi,
-            "Vol/OI": volume / oi if oi > 0 else 0
+            "Vol/OI": volume / oi if oi > 0 else 0,
+            "Funding": funding
         })
     
     tick_df = pd.DataFrame(tick_rows)
     market = prod_df.merge(tick_df, on="Coin", how="inner")
     return market.sort_values("24H Volume", ascending=False).reset_index(drop=True)
 
-st.write("Loading market data...")
-market = load_market()
-
-if market.empty:
-    st.error("Data nahi aaya. Refresh try karo.")
-    st.stop()
-
-st.success(f"Loaded {len(market)} coins")
-
-# Sidebar
-with st.sidebar:
-    st.header("Settings")
-    min_vol = st.number_input("Min Vol/OI (only for ≤20x)", 0.0, 20.0, 1.5, 0.5)
-    top_n = st.slider("Show top coins", 10, 50, 30)
-    if st.button("Refresh"):
-        st.cache_data.clear()
-        st.rerun()
-
-# Filter
-high = market[market["Max Leverage"] > 20]
-low = market[(market["Max Leverage"] <= 20) & (market["Vol/OI"] >= min_vol)]
-
-st.write(f"**> 20x coins:** {len(high)} (free from filter)")
-st.write(f"**≤ 20x coins (filtered):** {len(low)}")
-
-tab1, tab2, tab3 = st.tabs(["All", "> 20x Leverage", "≤ 20x Leverage"])
-
-with tab1:
-    st.dataframe(market.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-with tab2:
-    st.subheader("High Leverage (>20x)")
-    if high.empty:
-        st.info("No high leverage coins")
-    else:
-        st.dataframe(high.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-with tab3:
-    st.subheader("Low Leverage (≤20x)")
-    if low.empty:
-        st.info("No coins after filter")
-    else:
-        st.dataframe(low.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-st.caption("Simple version | Data from Delta Exchange India")
+@st.cache_data(ttl=60)
+def get_candles(symbol, resolution="15m", hours=24):
+    end = int(time.time())
+    start = end - hours * 3600
+    result = api_get("/v2/history/candles", {
+        "resolution": resolution,
+        "symbol": symbol,
+        "start": start,
+        "end": end
+    })
+    if not result:
+        return pd.DataFrame()
+    df = pd.DataFrame(result)
