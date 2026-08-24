@@ -5,28 +5,32 @@ import numpy as np
 import time
 
 # ============================================================
-# DELTA REVERSAL SCANNER - CLEAN REBUILD
-# Public Delta Exchange India API only
+# DELTA REVERSAL SCANNER
+# 20X+ MAX LEVERAGE FILTER
+# Delta Exchange India Public API
 # ============================================================
 
 BASE_URL = "https://api.india.delta.exchange"
+
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Delta-Reversal-Scanner-Clean/1.0",
+    "User-Agent": "Delta-Reversal-Scanner-20X/2.0",
 }
 
 st.set_page_config(
-    page_title="Delta Reversal Scanner",
+    page_title="Delta Reversal Scanner 20X+",
     page_icon="🔥",
     layout="wide",
 )
 
-# ----------------------------
-# Settings
-# ----------------------------
+# ============================================================
+# SETTINGS
+# ============================================================
+
 CACHE_TTL = 20
 TOP_COINS = 25
 DEFAULT_DEPTH = 15
+DEFAULT_MIN_LEVERAGE = 20.0
 
 
 # ============================================================
@@ -34,7 +38,6 @@ DEFAULT_DEPTH = 15
 # ============================================================
 
 def api_get(path, params=None, timeout=12):
-    """Safe public GET request to Delta India API."""
     try:
         response = requests.get(
             BASE_URL + path,
@@ -53,24 +56,36 @@ def api_get(path, params=None, timeout=12):
 
         return payload.get("result")
 
-    except (requests.RequestException, ValueError, TypeError):
+    except (
+        requests.RequestException,
+        ValueError,
+        TypeError,
+    ):
         return None
 
 
 # ============================================================
-# PRODUCTS
+# PRODUCTS + MAX LEVERAGE
 # ============================================================
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_perpetual_products():
+
     result = api_get("/v2/products")
 
     if not result:
-        return pd.DataFrame(columns=["Coin", "ID"])
+        return pd.DataFrame(
+            columns=[
+                "Coin",
+                "ID",
+                "Max Leverage",
+            ]
+        )
 
     rows = []
 
     for item in result:
+
         if item.get("contract_type") != "perpetual_futures":
             continue
 
@@ -81,16 +96,54 @@ def get_perpetual_products():
             continue
 
         symbol = item.get("symbol")
-        if symbol:
-            rows.append(
-                {
-                    "Coin": symbol,
-                    "ID": item.get("id"),
-                }
-            )
+
+        if not symbol:
+            continue
+
+        # ----------------------------------------------------
+        # Try common leverage fields
+        # ----------------------------------------------------
+
+        max_leverage = None
+
+        possible_fields = [
+            "max_leverage",
+            "default_leverage",
+            "leverage",
+        ]
+
+        for field in possible_fields:
+
+            value = item.get(field)
+
+            if value is not None:
+
+                try:
+                    max_leverage = float(value)
+                    break
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
+                    pass
+
+        rows.append(
+            {
+                "Coin": symbol,
+                "ID": item.get("id"),
+                "Max Leverage": max_leverage,
+            }
+        )
 
     if not rows:
-        return pd.DataFrame(columns=["Coin", "ID"])
+        return pd.DataFrame(
+            columns=[
+                "Coin",
+                "ID",
+                "Max Leverage",
+            ]
+        )
 
     return (
         pd.DataFrame(rows)
@@ -105,6 +158,7 @@ def get_perpetual_products():
 
 @st.cache_data(ttl=CACHE_TTL)
 def get_tickers():
+
     result = api_get("/v2/tickers")
 
     if not result:
@@ -113,40 +167,57 @@ def get_tickers():
     rows = []
 
     for item in result:
+
         symbol = item.get("symbol")
+
         if not symbol:
             continue
 
         try:
+
             price = float(
                 item.get("close")
                 or item.get("mark_price")
                 or 0
             )
+
             volume = float(
                 item.get("volume_24h")
                 or item.get("volume")
                 or 0
             )
+
             oi = float(
                 item.get("open_interest")
                 or item.get("oi")
                 or 0
             )
-        except (TypeError, ValueError):
+
+        except (
+            TypeError,
+            ValueError,
+        ):
             continue
 
         if price <= 0:
             continue
 
-        funding_raw = item.get("funding_rate")
+        funding_raw = item.get(
+            "funding_rate"
+        )
+
         try:
+
             funding = (
                 float(funding_raw)
                 if funding_raw is not None
                 else np.nan
             )
-        except (TypeError, ValueError):
+
+        except (
+            TypeError,
+            ValueError,
+        ):
             funding = np.nan
 
         rows.append(
@@ -166,20 +237,32 @@ def get_tickers():
 
     df["Vol/OI"] = (
         df["24H Volume"]
-        / df["OI"].replace(0, np.nan)
+        /
+        df["OI"].replace(
+            0,
+            np.nan,
+        )
     )
 
     return df
 
 
 # ============================================================
-# CANDLES / OI HISTORY
+# CANDLES
 # ============================================================
 
 @st.cache_data(ttl=CACHE_TTL)
-def get_history(symbol, resolution="5m", hours=48):
+def get_history(
+    symbol,
+    resolution="5m",
+    hours=48,
+):
+
     end = int(time.time())
-    start = end - int(hours * 3600)
+
+    start = end - int(
+        hours * 3600
+    )
 
     result = api_get(
         "/v2/history/candles",
@@ -199,43 +282,76 @@ def get_history(symbol, resolution="5m", hours=48):
     if df.empty:
         return df
 
-    for col in ["open", "high", "low", "close", "volume"]:
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+
         if col in df.columns:
+
             df[col] = pd.to_numeric(
                 df[col],
                 errors="coerce",
             )
 
     if "time" in df.columns:
+
         df["time"] = pd.to_numeric(
             df["time"],
             errors="coerce",
         )
 
-    required = ["open", "high", "low", "close"]
+    required = [
+        "open",
+        "high",
+        "low",
+        "close",
+    ]
 
-    if not all(c in df.columns for c in required):
+    if not all(
+        c in df.columns
+        for c in required
+    ):
         return pd.DataFrame()
 
-    df = df.dropna(subset=required)
+    df = df.dropna(
+        subset=required
+    )
 
     if "time" in df.columns:
-        df = df.sort_values("time")
 
-    return (
-        df.drop_duplicates("time")
-        .reset_index(drop=True)
-        if "time" in df.columns
-        else df.reset_index(drop=True)
+        df = df.sort_values(
+            "time"
+        )
+
+        df = df.drop_duplicates(
+            "time"
+        )
+
+    return df.reset_index(
+        drop=True
     )
 
 
-@st.cache_data(ttl=CACHE_TTL)
-def get_oi_history(symbol, hours=48):
-    end = int(time.time())
-    start = end - int(hours * 3600)
+# ============================================================
+# OI HISTORY
+# ============================================================
 
-    # Delta documents OI history as OI:<symbol>
+@st.cache_data(ttl=CACHE_TTL)
+def get_oi_history(
+    symbol,
+    hours=48,
+):
+
+    end = int(time.time())
+
+    start = end - int(
+        hours * 3600
+    )
+
     result = api_get(
         "/v2/history/candles",
         {
@@ -251,7 +367,10 @@ def get_oi_history(symbol, hours=48):
 
     df = pd.DataFrame(result)
 
-    if df.empty or "close" not in df.columns:
+    if (
+        df.empty
+        or "close" not in df.columns
+    ):
         return pd.DataFrame()
 
     df["close"] = pd.to_numeric(
@@ -260,14 +379,20 @@ def get_oi_history(symbol, hours=48):
     )
 
     if "time" in df.columns:
+
         df["time"] = pd.to_numeric(
             df["time"],
             errors="coerce",
         )
-        df = df.sort_values("time")
+
+        df = df.sort_values(
+            "time"
+        )
 
     return (
-        df.dropna(subset=["close"])
+        df.dropna(
+            subset=["close"]
+        )
         .reset_index(drop=True)
     )
 
@@ -277,17 +402,37 @@ def get_oi_history(symbol, hours=48):
 # ============================================================
 
 @st.cache_data(ttl=10)
-def get_orderbook(symbol, depth=15):
+def get_orderbook(
+    symbol,
+    depth=15,
+):
+
     result = api_get(
         f"/v2/l2orderbook/{symbol}",
-        {"depth": int(depth)},
+        {
+            "depth": int(depth)
+        },
     )
 
-    return result if isinstance(result, dict) else None
+    return (
+        result
+        if isinstance(
+            result,
+            dict,
+        )
+        else None
+    )
 
 
-def parse_orderbook(symbol, depth=15):
-    data = get_orderbook(symbol, depth)
+def parse_orderbook(
+    symbol,
+    depth=15,
+):
+
+    data = get_orderbook(
+        symbol,
+        depth,
+    )
 
     if not data:
         return None
@@ -299,58 +444,114 @@ def parse_orderbook(symbol, depth=15):
     ask_rows = []
 
     for row in bids:
+
         try:
+
             bid_rows.append(
                 {
-                    "Price": float(row["price"]),
-                    "Size": float(row["size"]),
+                    "Price": float(
+                        row["price"]
+                    ),
+                    "Size": float(
+                        row["size"]
+                    ),
                 }
             )
-        except (KeyError, TypeError, ValueError):
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
             pass
 
     for row in asks:
+
         try:
+
             ask_rows.append(
                 {
-                    "Price": float(row["price"]),
-                    "Size": float(row["size"]),
+                    "Price": float(
+                        row["price"]
+                    ),
+                    "Size": float(
+                        row["size"]
+                    ),
                 }
             )
-        except (KeyError, TypeError, ValueError):
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
             pass
 
-    if not bid_rows or not ask_rows:
+    if (
+        not bid_rows
+        or not ask_rows
+    ):
         return None
 
     bid_df = (
         pd.DataFrame(bid_rows)
-        .sort_values("Price", ascending=False)
+        .sort_values(
+            "Price",
+            ascending=False,
+        )
         .reset_index(drop=True)
     )
 
     ask_df = (
         pd.DataFrame(ask_rows)
-        .sort_values("Price", ascending=True)
+        .sort_values(
+            "Price",
+            ascending=True,
+        )
         .reset_index(drop=True)
     )
 
-    bid_depth = float(bid_df["Size"].sum())
-    ask_depth = float(ask_df["Size"].sum())
-    total_depth = bid_depth + ask_depth
+    bid_depth = float(
+        bid_df["Size"].sum()
+    )
+
+    ask_depth = float(
+        ask_df["Size"].sum()
+    )
+
+    total_depth = (
+        bid_depth
+        + ask_depth
+    )
 
     imbalance = (
-        (bid_depth - ask_depth)
+        (
+            bid_depth
+            - ask_depth
+        )
         / total_depth
         * 100
         if total_depth > 0
         else 0.0
     )
 
-    best_bid = float(bid_df["Price"].max())
-    best_ask = float(ask_df["Price"].min())
-    mid = (best_bid + best_ask) / 2
-    spread = best_ask - best_bid
+    best_bid = float(
+        bid_df["Price"].max()
+    )
+
+    best_ask = float(
+        ask_df["Price"].min()
+    )
+
+    mid = (
+        best_bid
+        + best_ask
+    ) / 2
+
+    spread = (
+        best_ask
+        - best_bid
+    )
 
     return {
         "symbol": symbol,
@@ -371,54 +572,92 @@ def parse_orderbook(symbol, depth=15):
 # ============================================================
 
 @st.cache_data(ttl=10)
-def get_recent_trades(symbol):
-    result = api_get(f"/v2/trades/{symbol}")
+def get_recent_trades(
+    symbol
+):
 
-    if not isinstance(result, dict):
+    result = api_get(
+        f"/v2/trades/{symbol}"
+    )
+
+    if not isinstance(
+        result,
+        dict,
+    ):
         return pd.DataFrame()
 
-    trades = result.get("trades") or []
+    trades = (
+        result.get("trades")
+        or []
+    )
 
     if not trades:
         return pd.DataFrame()
 
-    df = pd.DataFrame(trades)
+    df = pd.DataFrame(
+        trades
+    )
 
     if "price" in df.columns:
+
         df["price"] = pd.to_numeric(
             df["price"],
             errors="coerce",
         )
 
     if "size" in df.columns:
+
         df["size"] = pd.to_numeric(
             df["size"],
             errors="coerce",
         )
 
     if "side" not in df.columns:
-        # Newer feeds can use buyer-role fields in websocket,
-        # but REST public trades normally exposes side.
         return df
 
-    return df.dropna(
-        subset=["price", "size"]
-    ).reset_index(drop=True)
+    return (
+        df.dropna(
+            subset=[
+                "price",
+                "size",
+            ]
+        )
+        .reset_index(drop=True)
+    )
 
 
-def trade_flow(symbol):
-    df = get_recent_trades(symbol)
+def trade_flow(
+    symbol
+):
 
-    if df.empty or "side" not in df.columns:
+    df = get_recent_trades(
+        symbol
+    )
+
+    if (
+        df.empty
+        or "side" not in df.columns
+    ):
         return None
 
-    side = df["side"].astype(str).str.lower()
+    side = (
+        df["side"]
+        .astype(str)
+        .str.lower()
+    )
 
     buy = float(
-        df.loc[side == "buy", "size"].sum()
+        df.loc[
+            side == "buy",
+            "size",
+        ].sum()
     )
+
     sell = float(
-        df.loc[side == "sell", "size"].sum()
+        df.loc[
+            side == "sell",
+            "size",
+        ].sum()
     )
 
     total = buy + sell
@@ -427,7 +666,12 @@ def trade_flow(symbol):
         return None
 
     delta = buy - sell
-    delta_pct = delta / total * 100
+
+    delta_pct = (
+        delta
+        / total
+        * 100
+    )
 
     return {
         "buy": buy,
@@ -442,126 +686,219 @@ def trade_flow(symbol):
 # OI CHANGE
 # ============================================================
 
-def oi_change(symbol):
-    df = get_oi_history(symbol, 48)
+def oi_change(
+    symbol
+):
+
+    df = get_oi_history(
+        symbol,
+        48,
+    )
 
     if len(df) < 2:
         return None
 
-    old = float(df["close"].iloc[0])
-    current = float(df["close"].iloc[-1])
+    old = float(
+        df["close"].iloc[0]
+    )
+
+    current = float(
+        df["close"].iloc[-1]
+    )
 
     if old == 0:
         return None
 
-    return (current - old) / abs(old) * 100
+    return (
+        (
+            current - old
+        )
+        /
+        abs(old)
+        * 100
+    )
 
 
 # ============================================================
-# ATR / TREND / STRUCTURE
+# ATR
 # ============================================================
 
-def add_atr(df, period=14):
+def add_atr(
+    df,
+    period=14,
+):
+
     x = df.copy()
 
-    previous_close = x["close"].shift(1)
+    previous_close = (
+        x["close"].shift(1)
+    )
 
     tr = pd.concat(
         [
             x["high"] - x["low"],
-            (x["high"] - previous_close).abs(),
-            (x["low"] - previous_close).abs(),
+            (
+                x["high"]
+                - previous_close
+            ).abs(),
+            (
+                x["low"]
+                - previous_close
+            ).abs(),
         ],
         axis=1,
     ).max(axis=1)
 
-    x["ATR"] = tr.rolling(period).mean()
+    x["ATR"] = (
+        tr.rolling(
+            period
+        ).mean()
+    )
 
     return x
 
 
-def trend_label(df):
+# ============================================================
+# TREND
+# ============================================================
+
+def trend_label(
+    df
+):
+
     if len(df) < 30:
         return "⚪ UNKNOWN"
 
     close = df["close"]
 
-    ema9 = close.ewm(
-        span=9,
-        adjust=False,
-    ).mean()
+    ema9 = (
+        close.ewm(
+            span=9,
+            adjust=False,
+        )
+        .mean()
+    )
 
-    ema21 = close.ewm(
-        span=21,
-        adjust=False,
-    ).mean()
+    ema21 = (
+        close.ewm(
+            span=21,
+            adjust=False,
+        )
+        .mean()
+    )
 
-    ema50 = close.ewm(
-        span=50,
-        adjust=False,
-    ).mean()
+    ema50 = (
+        close.ewm(
+            span=50,
+            adjust=False,
+        )
+        .mean()
+    )
 
-    last = float(close.iloc[-1])
+    last = float(
+        close.iloc[-1]
+    )
 
     if (
         last > ema9.iloc[-1]
-        and ema9.iloc[-1] > ema21.iloc[-1]
-        and ema21.iloc[-1] > ema50.iloc[-1]
+        and ema9.iloc[-1]
+        > ema21.iloc[-1]
+        and ema21.iloc[-1]
+        > ema50.iloc[-1]
     ):
         return "🟢 BULL"
 
     if (
         last < ema9.iloc[-1]
-        and ema9.iloc[-1] < ema21.iloc[-1]
-        and ema21.iloc[-1] < ema50.iloc[-1]
+        and ema9.iloc[-1]
+        < ema21.iloc[-1]
+        and ema21.iloc[-1]
+        < ema50.iloc[-1]
     ):
         return "🔴 BEAR"
 
     return "🟡 MIXED"
 
 
-def structure_signal(df):
+# ============================================================
+# STRUCTURE
+# ============================================================
+
+def structure_signal(
+    df
+):
+
     if len(df) < 20:
+
         return {
             "sweep": "⚪ None",
             "bos": "⚪ None",
         }
 
     x = df.copy()
+
     last = x.iloc[-1]
 
     previous_high = float(
-        x["high"].iloc[-10:-1].max()
+        x["high"]
+        .iloc[-10:-1]
+        .max()
     )
+
     previous_low = float(
-        x["low"].iloc[-10:-1].min()
+        x["low"]
+        .iloc[-10:-1]
+        .min()
     )
 
     bull_sweep = (
-        float(last["low"]) < previous_low
-        and float(last["close"]) > previous_low
+        float(last["low"])
+        < previous_low
+        and
+        float(last["close"])
+        > previous_low
     )
 
     bear_sweep = (
-        float(last["high"]) > previous_high
-        and float(last["close"]) < previous_high
+        float(last["high"])
+        > previous_high
+        and
+        float(last["close"])
+        < previous_high
     )
 
-    bull_bos = float(last["close"]) > previous_high
-    bear_bos = float(last["close"]) < previous_low
+    bull_bos = (
+        float(last["close"])
+        > previous_high
+    )
+
+    bear_bos = (
+        float(last["close"])
+        < previous_low
+    )
 
     if bull_sweep:
+
         sweep = "🟢 BULL SWEEP"
+
     elif bear_sweep:
+
         sweep = "🔴 BEAR SWEEP"
+
     else:
+
         sweep = "⚪ None"
 
     if bull_bos:
+
         bos = "🟢 BULL BOS"
+
     elif bear_bos:
+
         bos = "🔴 BEAR BOS"
+
     else:
+
         bos = "⚪ None"
 
     return {
@@ -571,75 +908,129 @@ def structure_signal(df):
 
 
 # ============================================================
-# LIQUIDATION-LIKE PRESSURE PROXY
+# LIQUIDATION-LIKE PRESSURE
 # ============================================================
 
-def liquidation_proxy(symbol):
-    """
-    IMPORTANT:
-    Delta's public REST API does NOT provide a public,
-    all-trader liquidation feed.
+def liquidation_proxy(
+    symbol
+):
 
-    This function therefore estimates liquidation-like
-    pressure from public Delta data:
-      - aggressive/public trade imbalance
-      - OI change
-      - price movement
-      - L2 order-book imbalance
+    flow = trade_flow(
+        symbol
+    )
 
-    It is NOT actual liquidation volume.
-    """
+    ob = parse_orderbook(
+        symbol,
+        DEFAULT_DEPTH,
+    )
 
-    flow = trade_flow(symbol)
-    ob = parse_orderbook(symbol, DEFAULT_DEPTH)
-
-    if flow is None and ob is None:
+    if (
+        flow is None
+        and ob is None
+    ):
         return None
 
-    oi_ch = oi_change(symbol)
+    oi_ch = oi_change(
+        symbol
+    )
 
     score = 0
+
     reasons = []
 
     if flow is not None:
-        d = flow["delta_pct"]
+
+        d = flow[
+            "delta_pct"
+        ]
 
         if abs(d) >= 40:
+
             score += 2
-            reasons.append("strong trade delta")
+
+            reasons.append(
+                "strong trade delta"
+            )
+
         elif abs(d) >= 25:
+
             score += 1
-            reasons.append("trade delta")
+
+            reasons.append(
+                "trade delta"
+            )
 
     if ob is not None:
-        imbalance = ob["imbalance"]
+
+        imbalance = ob[
+            "imbalance"
+        ]
 
         if abs(imbalance) >= 35:
-            score += 2
-            reasons.append("strong L2 imbalance")
-        elif abs(imbalance) >= 20:
-            score += 1
-            reasons.append("L2 imbalance")
 
-    if oi_ch is not None and abs(oi_ch) >= 2:
+            score += 2
+
+            reasons.append(
+                "strong L2 imbalance"
+            )
+
+        elif abs(imbalance) >= 20:
+
+            score += 1
+
+            reasons.append(
+                "L2 imbalance"
+            )
+
+    if (
+        oi_ch is not None
+        and abs(oi_ch) >= 2
+    ):
+
         score += 1
-        reasons.append("OI displacement")
+
+        reasons.append(
+            "OI displacement"
+        )
 
     if flow is not None:
-        if flow["delta_pct"] > 0:
-            side = "BUY-SIDE PRESSURE"
-        elif flow["delta_pct"] < 0:
-            side = "SELL-SIDE PRESSURE"
+
+        if (
+            flow["delta_pct"]
+            > 0
+        ):
+
+            side = (
+                "BUY-SIDE PRESSURE"
+            )
+
+        elif (
+            flow["delta_pct"]
+            < 0
+        ):
+
+            side = (
+                "SELL-SIDE PRESSURE"
+            )
+
         else:
+
             side = "BALANCED"
+
     else:
+
         side = "UNKNOWN"
 
     if score >= 4:
+
         level = "🔥 HIGH"
+
     elif score >= 2:
+
         level = "🟡 MEDIUM"
+
     else:
+
         level = "⚪ LOW"
 
     return {
@@ -657,229 +1048,389 @@ def liquidation_proxy(symbol):
             if ob is not None
             else np.nan
         ),
-        "reason": ", ".join(reasons) if reasons else "None",
+        "reason": (
+            ", ".join(reasons)
+            if reasons
+            else "None"
+        ),
     }
 
 
 # ============================================================
-# CURRENT LIQUIDITY SNAPSHOT / HEATMAP TABLE
+# SCAN COIN
 # ============================================================
 
-def liquidity_levels(symbol, depth=15):
-    ob = parse_orderbook(symbol, depth)
+def scan_coin(
+    symbol,
+    ticker,
+):
 
-    if ob is None:
-        return None
-
-    bid = ob["bid_df"].copy()
-    ask = ob["ask_df"].copy()
-
-    mid = ob["mid"]
-
-    bid["Side"] = "BID"
-    ask["Side"] = "ASK"
-
-    bid["Distance %"] = (
-        (mid - bid["Price"])
-        / mid
-        * 100
+    d5 = get_history(
+        symbol,
+        "5m",
+        36,
     )
 
-    ask["Distance %"] = (
-        (ask["Price"] - mid)
-        / mid
-        * 100
+    d15 = get_history(
+        symbol,
+        "15m",
+        72,
     )
 
-    levels = pd.concat(
-        [bid, ask],
-        ignore_index=True,
+    d1h = get_history(
+        symbol,
+        "1h",
+        120,
     )
 
-    levels["Notional"] = (
-        levels["Price"]
-        * levels["Size"]
-    )
+    if min(
+        len(d5),
+        len(d15),
+        len(d1h),
+    ) < 25:
 
-    levels["Distance %"] = levels[
-        "Distance %"
-    ].round(4)
-
-    levels["Size"] = levels[
-        "Size"
-    ].round(4)
-
-    levels["Notional"] = levels[
-        "Notional"
-    ].round(2)
-
-    return ob, levels.sort_values(
-        ["Side", "Distance %"]
-    )
-
-
-# ============================================================
-# SCANNER ROW
-# ============================================================
-
-def scan_coin(symbol, ticker):
-    d5 = get_history(symbol, "5m", 36)
-    d15 = get_history(symbol, "15m", 72)
-    d1h = get_history(symbol, "1h", 120)
-
-    if min(len(d5), len(d15), len(d1h)) < 25:
         return None
 
     t5 = trend_label(d5)
+
     t15 = trend_label(d15)
+
     t1h = trend_label(d1h)
 
     bulls = sum(
         x == "🟢 BULL"
-        for x in [t5, t15, t1h]
+        for x in [
+            t5,
+            t15,
+            t1h,
+        ]
     )
+
     bears = sum(
         x == "🔴 BEAR"
-        for x in [t5, t15, t1h]
+        for x in [
+            t5,
+            t15,
+            t1h,
+        ]
     )
 
     if bulls == 3:
+
         mtf = "🟢 LONG ALIGNED"
+
     elif bears == 3:
+
         mtf = "🔴 SHORT ALIGNED"
+
     elif bulls >= 2:
+
         mtf = "🟢 LONG BIAS"
+
     elif bears >= 2:
+
         mtf = "🔴 SHORT BIAS"
+
     else:
+
         mtf = "⚪ CONFLICT"
 
-    structure = structure_signal(d5)
+    structure = structure_signal(
+        d5
+    )
 
-    atr_df = add_atr(d5)
+    atr_df = add_atr(
+        d5
+    )
+
     atr = (
-        float(atr_df["ATR"].iloc[-1])
-        if not pd.isna(atr_df["ATR"].iloc[-1])
+        float(
+            atr_df["ATR"].iloc[-1]
+        )
+        if not pd.isna(
+            atr_df["ATR"].iloc[-1]
+        )
         else np.nan
     )
 
     volume_x = 0.0
-    if len(d5) >= 8 and "volume" in d5.columns:
+
+    if (
+        len(d5) >= 8
+        and "volume" in d5.columns
+    ):
+
         avg_volume = float(
-            d5["volume"].iloc[-7:-1].mean()
+            d5["volume"]
+            .iloc[-7:-1]
+            .mean()
         )
+
         if avg_volume > 0:
+
             volume_x = float(
                 d5["volume"].iloc[-1]
                 / avg_volume
             )
 
-    oi_ch = oi_change(symbol)
-    ob = parse_orderbook(symbol, DEFAULT_DEPTH)
-    liq = liquidation_proxy(symbol)
+    oi_ch = oi_change(
+        symbol
+    )
+
+    ob = parse_orderbook(
+        symbol,
+        DEFAULT_DEPTH,
+    )
+
+    liq = liquidation_proxy(
+        symbol
+    )
 
     long_score = 0
     short_score = 0
 
-    if mtf == "🟢 LONG ALIGNED":
+    if (
+        mtf
+        == "🟢 LONG ALIGNED"
+    ):
+
         long_score += 4
-    elif mtf == "🔴 SHORT ALIGNED":
+
+    elif (
+        mtf
+        == "🔴 SHORT ALIGNED"
+    ):
+
         short_score += 4
-    elif mtf == "🟢 LONG BIAS":
+
+    elif (
+        mtf
+        == "🟢 LONG BIAS"
+    ):
+
         long_score += 2
-    elif mtf == "🔴 SHORT BIAS":
+
+    elif (
+        mtf
+        == "🔴 SHORT BIAS"
+    ):
+
         short_score += 2
 
-    if "BULL" in structure["sweep"]:
+    if (
+        "BULL"
+        in structure["sweep"]
+    ):
+
         long_score += 2
 
-    if "BEAR" in structure["sweep"]:
+    if (
+        "BEAR"
+        in structure["sweep"]
+    ):
+
         short_score += 2
 
-    if "BULL" in structure["bos"]:
+    if (
+        "BULL"
+        in structure["bos"]
+    ):
+
         long_score += 3
 
-    if "BEAR" in structure["bos"]:
+    if (
+        "BEAR"
+        in structure["bos"]
+    ):
+
         short_score += 3
 
     if volume_x >= 2:
+
         long_score += 1
         short_score += 1
 
     if oi_ch is not None:
+
         if oi_ch >= 1:
-            if mtf.startswith("🟢"):
+
+            if mtf.startswith(
+                "🟢"
+            ):
+
                 long_score += 2
-            elif mtf.startswith("🔴"):
+
+            elif mtf.startswith(
+                "🔴"
+            ):
+
                 short_score += 2
 
     if ob is not None:
-        if ob["imbalance"] >= 25:
+
+        if (
+            ob["imbalance"]
+            >= 25
+        ):
+
             long_score += 2
-        elif ob["imbalance"] <= -25:
+
+        elif (
+            ob["imbalance"]
+            <= -25
+        ):
+
             short_score += 2
 
     if liq is not None:
-        if liq["side"] == "BUY-SIDE PRESSURE":
+
+        if (
+            liq["side"]
+            == "BUY-SIDE PRESSURE"
+        ):
+
             long_score += 1
-        elif liq["side"] == "SELL-SIDE PRESSURE":
+
+        elif (
+            liq["side"]
+            == "SELL-SIDE PRESSURE"
+        ):
+
             short_score += 1
 
     if (
         mtf == "⚪ CONFLICT"
-        or max(long_score, short_score) < 5
+        or
+        max(
+            long_score,
+            short_score,
+        ) < 5
     ):
-        signal = "⚪ NO SIGNAL"
-    elif long_score > short_score:
+
+        signal = (
+            "⚪ NO SIGNAL"
+        )
+
+    elif (
+        long_score
+        > short_score
+    ):
+
         signal = (
             "🟢 STRONG LONG"
             if long_score >= 8
             else "🟡 LONG WATCH"
         )
-    elif short_score > long_score:
+
+    elif (
+        short_score
+        > long_score
+    ):
+
         signal = (
             "🔴 STRONG SHORT"
             if short_score >= 8
             else "🟠 SHORT WATCH"
         )
+
     else:
-        signal = "⚪ NO SIGNAL"
+
+        signal = (
+            "⚪ NO SIGNAL"
+        )
 
     return {
+
         "Coin": symbol,
-        "Price": float(ticker["Price"]),
+
+        "Price": float(
+            ticker["Price"]
+        ),
+
+        "Max Leverage": (
+            float(
+                ticker[
+                    "Max Leverage"
+                ]
+            )
+            if pd.notna(
+                ticker[
+                    "Max Leverage"
+                ]
+            )
+            else np.nan
+        ),
+
         "Vol/OI": round(
-            float(ticker["Vol/OI"])
-            if pd.notna(ticker["Vol/OI"])
+            float(
+                ticker["Vol/OI"]
+            )
+            if pd.notna(
+                ticker["Vol/OI"]
+            )
             else 0,
             2,
         ),
+
         "5m": t5,
+
         "15m": t15,
+
         "1H": t1h,
+
         "MTF": mtf,
-        "Sweep": structure["sweep"],
-        "BOS": structure["bos"],
-        "Volume x": round(volume_x, 2),
+
+        "Sweep": structure[
+            "sweep"
+        ],
+
+        "BOS": structure[
+            "bos"
+        ],
+
+        "Volume x": round(
+            volume_x,
+            2,
+        ),
+
         "OI Change %": (
-            round(oi_ch, 2)
+            round(
+                oi_ch,
+                2,
+            )
             if oi_ch is not None
             else np.nan
         ),
+
         "OB Imbalance %": (
-            round(ob["imbalance"], 2)
+            round(
+                ob["imbalance"],
+                2,
+            )
             if ob is not None
             else np.nan
         ),
+
         "Liq Pressure": (
             liq["level"]
             if liq is not None
             else "⚪ UNKNOWN"
         ),
-        "Long Score": long_score,
-        "Short Score": short_score,
-        "Score": max(long_score, short_score),
-        "Signal": signal,
+
+        "Long Score":
+            long_score,
+
+        "Short Score":
+            short_score,
+
+        "Score":
+            max(
+                long_score,
+                short_score,
+            ),
+
+        "Signal":
+            signal,
     }
 
 
@@ -887,15 +1438,24 @@ def scan_coin(symbol, ticker):
 # MARKET LOAD
 # ============================================================
 
-products = get_perpetual_products()
+products = (
+    get_perpetual_products()
+)
+
 tickers = get_tickers()
 
-if products.empty or tickers.empty:
+if (
+    products.empty
+    or tickers.empty
+):
+
     st.error(
         "❌ Delta market data load nahi hua. "
         "Thodi der baad Refresh dabao."
     )
+
     st.stop()
+
 
 market = products.merge(
     tickers,
@@ -903,26 +1463,43 @@ market = products.merge(
     how="left",
 )
 
-market = market.dropna(subset=["Price"])
 
-market = market.sort_values(
-    "24H Volume",
-    ascending=False,
-).reset_index(drop=True)
+# ============================================================
+# LEVERAGE CLEANUP
+# ============================================================
 
-st.title("🔥 Delta Reversal Scanner")
-st.caption(
-    "Delta India public data → MTF → Structure → OI → "
-    "Funding → L2 Order Book → Trade Flow → "
-    "Liquidation-like pressure"
+market[
+    "Max Leverage"
+] = pd.to_numeric(
+    market[
+        "Max Leverage"
+    ],
+    errors="coerce",
 )
+
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
 with st.sidebar:
-    st.header("⚙️ Scanner Settings")
+
+    st.header(
+        "⚙️ Scanner Settings"
+    )
+
+    min_leverage = st.number_input(
+        "Minimum Max Leverage",
+        min_value=1.0,
+        max_value=200.0,
+        value=20.0,
+        step=1.0,
+        help=(
+            "Sirf un perpetual contracts ko "
+            "scan karega jinka maximum leverage "
+            "is value se zyada hai."
+        ),
+    )
 
     min_vol_oi = st.number_input(
         "Minimum Vol/OI",
@@ -947,23 +1524,139 @@ with st.sidebar:
         step=5,
     )
 
-    if st.button("🔄 Refresh All Data"):
+    if st.button(
+        "🔄 Refresh All Data"
+    ):
+
         st.cache_data.clear()
+
         st.rerun()
 
-market_filtered = market[
-    market["Vol/OI"].fillna(0) > min_vol_oi
+
+# ============================================================
+# LEVERAGE FILTER
+# ============================================================
+
+market_leverage = market[
+    market[
+        "Max Leverage"
+    ].notna()
+    &
+    (
+        market[
+            "Max Leverage"
+        ]
+        > min_leverage
+    )
 ].copy()
 
-st.metric(
-    "Perpetual contracts",
+
+# ============================================================
+# VOLUME/OI FILTER
+# ============================================================
+
+market_filtered = market_leverage[
+    market_leverage[
+        "Vol/OI"
+    ].fillna(0)
+    > min_vol_oi
+].copy()
+
+
+market_filtered = (
+    market_filtered
+    .sort_values(
+        "24H Volume",
+        ascending=False,
+    )
+    .reset_index(drop=True)
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title(
+    "🔥 Delta Reversal Scanner"
+)
+
+st.caption(
+    "20X+ Max Leverage → Volume/OI → "
+    "MTF → Structure → OI → L2 → "
+    "Trade Flow → Liquidation-like Pressure"
+)
+
+
+# ============================================================
+# MARKET METRICS
+# ============================================================
+
+c1, c2, c3, c4 = st.columns(4)
+
+c1.metric(
+    "Total Perpetuals",
     len(market),
 )
 
-st.metric(
-    f"Coins with Vol/OI > {min_vol_oi:g}",
+c2.metric(
+    f"Max Leverage > {min_leverage:g}x",
+    len(market_leverage),
+)
+
+c3.metric(
+    f"Leverage + Vol/OI > {min_vol_oi:g}",
     len(market_filtered),
 )
+
+c4.metric(
+    "Highest Max Leverage",
+    (
+        f'{market["Max Leverage"].max():.0f}x'
+        if market[
+            "Max Leverage"
+        ].notna().any()
+        else "N/A"
+    ),
+)
+
+
+# ============================================================
+# LEVERAGE UNIVERSE
+# ============================================================
+
+with st.expander(
+    "📊 View 20X+ Leverage Coins"
+):
+
+    leverage_view = (
+        market_leverage[
+            [
+                "Coin",
+                "Price",
+                "Max Leverage",
+                "24H Volume",
+                "OI",
+                "Vol/OI",
+                "Funding",
+            ]
+        ]
+        .sort_values(
+            "Max Leverage",
+            ascending=False,
+        )
+    )
+
+    st.dataframe(
+        leverage_view,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# ============================================================
+# PAGE
+# ============================================================
 
 mode = st.radio(
     "Page",
@@ -982,40 +1675,59 @@ mode = st.radio(
 # ============================================================
 
 if mode == "🔥 Live Scanner":
-    candidates = market_filtered.head(scan_limit)
+
+    candidates = (
+        market_filtered
+        .head(scan_limit)
+    )
 
     if candidates.empty:
+
         st.warning(
-            "Vol/OI filter ke baad koi coin nahi mila."
+            "20x+ leverage aur Vol/OI "
+            "filters ke baad koi coin nahi mila."
         )
+
         st.stop()
 
     st.info(
-        f"{len(candidates)} coins scan honge. "
-        "Deep scan API calls zyada ho sakti hain."
+        f"{len(candidates)} coins deep scan honge."
     )
 
     results = []
+
     progress = st.progress(0)
 
-    for i, (_, row) in enumerate(
+    for i, (
+        _,
+        row,
+    ) in enumerate(
         candidates.iterrows()
     ):
+
         try:
+
             result = scan_coin(
                 row["Coin"],
                 row,
             )
+
             if result is not None:
-                results.append(result)
+
+                results.append(
+                    result
+                )
+
         except Exception:
-            # One bad symbol must not crash the whole app.
             pass
 
         progress.progress(
             int(
-                (i + 1)
-                / len(candidates)
+                (
+                    i + 1
+                )
+                /
+                len(candidates)
                 * 100
             )
         )
@@ -1023,14 +1735,21 @@ if mode == "🔥 Live Scanner":
     progress.empty()
 
     if not results:
+
         st.warning(
-            "Scanner ko enough candle/orderbook data nahi mila."
+            "Scanner ko enough market "
+            "data nahi mila."
         )
+
         st.stop()
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(
+        results
+    )
 
-    st.subheader("🎯 Complete Scanner")
+    st.subheader(
+        "🎯 Complete Scanner"
+    )
 
     st.dataframe(
         df.sort_values(
@@ -1041,14 +1760,24 @@ if mode == "🔥 Live Scanner":
         hide_index=True,
     )
 
+
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
+
     col1, col2 = st.columns(2)
 
     with col1:
-        st.subheader("🟢 Long Watch")
 
-        long_df = df.sort_values(
-            "Long Score",
-            ascending=False,
+        st.subheader(
+            "🟢 Long Watch"
+        )
+
+        long_df = (
+            df.sort_values(
+                "Long Score",
+                ascending=False,
+            )
         )
 
         st.dataframe(
@@ -1056,6 +1785,7 @@ if mode == "🔥 Live Scanner":
                 [
                     "Coin",
                     "Price",
+                    "Max Leverage",
                     "MTF",
                     "Sweep",
                     "BOS",
@@ -1071,12 +1801,22 @@ if mode == "🔥 Live Scanner":
             hide_index=True,
         )
 
-    with col2:
-        st.subheader("🔴 Short Watch")
 
-        short_df = df.sort_values(
-            "Short Score",
-            ascending=False,
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
+
+    with col2:
+
+        st.subheader(
+            "🔴 Short Watch"
+        )
+
+        short_df = (
+            df.sort_values(
+                "Short Score",
+                ascending=False,
+            )
         )
 
         st.dataframe(
@@ -1084,6 +1824,7 @@ if mode == "🔥 Live Scanner":
                 [
                     "Coin",
                     "Price",
+                    "Max Leverage",
                     "MTF",
                     "Sweep",
                     "BOS",
@@ -1105,12 +1846,25 @@ if mode == "🔥 Live Scanner":
 # ============================================================
 
 elif mode == "📚 L2 Order Book":
-    st.subheader("📚 Delta L2 Order Book")
 
-    symbols = market["Coin"].head(100).tolist()
+    st.subheader(
+        "📚 Delta L2 Order Book"
+    )
+
+    symbols = (
+        market_leverage[
+            "Coin"
+        ]
+        .head(100)
+        .tolist()
+    )
 
     if not symbols:
-        st.warning("Coins available nahi hain.")
+
+        st.warning(
+            "20x+ leverage coins available nahi hain."
+        )
+
         st.stop()
 
     selected = st.selectbox(
@@ -1118,16 +1872,34 @@ elif mode == "📚 L2 Order Book":
         symbols,
     )
 
-    if st.button("🔍 Load L2"):
+    selected_lev = market_leverage.loc[
+        market_leverage["Coin"]
+        == selected,
+        "Max Leverage",
+    ]
+
+    if not selected_lev.empty:
+
+        st.info(
+            f"⚡ {selected} maximum leverage: "
+            f"{selected_lev.iloc[0]:.0f}x"
+        )
+
+    if st.button(
+        "🔍 Load L2"
+    ):
+
         ob = parse_orderbook(
             selected,
             depth,
         )
 
         if ob is None:
+
             st.error(
                 "Delta L2 orderbook data nahi mila."
             )
+
             st.stop()
 
         c1, c2, c3, c4 = st.columns(4)
@@ -1152,29 +1924,46 @@ elif mode == "📚 L2 Order Book":
             f'{ob["ask_depth"]:,.0f}',
         )
 
-        imbalance = ob["imbalance"]
+        imbalance = ob[
+            "imbalance"
+        ]
 
         if imbalance >= 25:
+
             st.success(
-                f"🟢 Bid imbalance: {imbalance:.2f}%"
+                f"🟢 Bid imbalance: "
+                f"{imbalance:.2f}%"
             )
+
         elif imbalance <= -25:
+
             st.error(
-                f"🔴 Ask imbalance: {imbalance:.2f}%"
+                f"🔴 Ask imbalance: "
+                f"{imbalance:.2f}%"
             )
+
         else:
+
             st.info(
-                f"⚪ Balanced: {imbalance:.2f}%"
+                f"⚪ Balanced: "
+                f"{imbalance:.2f}%"
             )
 
         left, right = st.columns(2)
 
         with left:
-            st.subheader("🟢 BIDS")
 
-            bid = ob["bid_df"].copy()
+            st.subheader(
+                "🟢 BIDS"
+            )
+
+            bid = ob[
+                "bid_df"
+            ].copy()
+
             bid["Notional"] = (
-                bid["Price"] * bid["Size"]
+                bid["Price"]
+                * bid["Size"]
             )
 
             st.dataframe(
@@ -1184,11 +1973,18 @@ elif mode == "📚 L2 Order Book":
             )
 
         with right:
-            st.subheader("🔴 ASKS")
 
-            ask = ob["ask_df"].copy()
+            st.subheader(
+                "🔴 ASKS"
+            )
+
+            ask = ob[
+                "ask_df"
+            ].copy()
+
             ask["Notional"] = (
-                ask["Price"] * ask["Size"]
+                ask["Price"]
+                * ask["Size"]
             )
 
             st.dataframe(
@@ -1198,8 +1994,7 @@ elif mode == "📚 L2 Order Book":
             )
 
         st.warning(
-            "⚠️ Visible L2 walls can be cancelled. "
-            "Wall ko guaranteed support/resistance mat samjho."
+            "⚠️ Visible L2 walls cancel ho sakte hain."
         )
 
 
@@ -1208,77 +2003,136 @@ elif mode == "📚 L2 Order Book":
 # ============================================================
 
 elif mode == "💥 Liquidation Pressure":
+
     st.subheader(
         "💥 Liquidation-like Pressure Scanner"
     )
 
     st.warning(
-        "Important: Delta public API par sab traders ki "
-        "actual liquidation feed public REST endpoint ke "
-        "roop me available nahi hai. Is page ka signal "
-        "public trades + L2 + OI se pressure proxy hai, "
-        "actual liquidation volume nahi."
+        "Actual liquidation volume nahi hai. "
+        "Ye public trades + L2 + OI based pressure proxy hai."
     )
 
-    candidates = market_filtered.head(
-        scan_limit
+    candidates = (
+        market_filtered
+        .head(scan_limit)
     )
 
     if candidates.empty:
+
         st.warning(
-            "Vol/OI filter ke baad koi coin nahi mila."
+            "20x+ leverage + Vol/OI "
+            "filter ke baad koi coin nahi mila."
         )
+
         st.stop()
 
     rows = []
+
     progress = st.progress(0)
 
-    for i, (_, row) in enumerate(
+    for i, (
+        _,
+        row,
+    ) in enumerate(
         candidates.iterrows()
     ):
-        symbol = row["Coin"]
+
+        symbol = row[
+            "Coin"
+        ]
 
         try:
-            liq = liquidation_proxy(symbol)
+
+            liq = liquidation_proxy(
+                symbol
+            )
 
             if liq is not None:
+
                 rows.append(
                     {
                         "Coin": symbol,
-                        "Price": row["Price"],
-                        "Pressure": liq["level"],
-                        "Side": liq["side"],
-                        "Proxy Score": liq["score"],
-                        "Trade Delta %": round(
-                            liq["delta_pct"], 2
-                        )
-                        if pd.notna(
-                            liq["delta_pct"]
-                        )
-                        else np.nan,
-                        "OI Change %": round(
-                            liq["oi_change"], 2
-                        )
-                        if liq["oi_change"]
-                        is not None
-                        else np.nan,
-                        "L2 Imbalance %": round(
-                            liq["ob_imbalance"], 2
-                        )
-                        if pd.notna(
-                            liq["ob_imbalance"]
-                        )
-                        else np.nan,
-                        "Reason": liq["reason"],
+
+                        "Price": row[
+                            "Price"
+                        ],
+
+                        "Max Leverage": row[
+                            "Max Leverage"
+                        ],
+
+                        "Pressure": liq[
+                            "level"
+                        ],
+
+                        "Side": liq[
+                            "side"
+                        ],
+
+                        "Proxy Score": liq[
+                            "score"
+                        ],
+
+                        "Trade Delta %": (
+                            round(
+                                liq[
+                                    "delta_pct"
+                                ],
+                                2,
+                            )
+                            if pd.notna(
+                                liq[
+                                    "delta_pct"
+                                ]
+                            )
+                            else np.nan
+                        ),
+
+                        "OI Change %": (
+                            round(
+                                liq[
+                                    "oi_change"
+                                ],
+                                2,
+                            )
+                            if liq[
+                                "oi_change"
+                            ] is not None
+                            else np.nan
+                        ),
+
+                        "L2 Imbalance %": (
+                            round(
+                                liq[
+                                    "ob_imbalance"
+                                ],
+                                2,
+                            )
+                            if pd.notna(
+                                liq[
+                                    "ob_imbalance"
+                                ]
+                            )
+                            else np.nan
+                        ),
+
+                        "Reason": liq[
+                            "reason"
+                        ],
                     }
                 )
+
         except Exception:
             pass
 
         progress.progress(
             int(
-                (i + 1)
-                / len(candidates)
+                (
+                    i + 1
+                )
+                /
+                len(candidates)
                 * 100
             )
         )
@@ -1286,7 +2140,10 @@ elif mode == "💥 Liquidation Pressure":
     progress.empty()
 
     if rows:
-        liq_df = pd.DataFrame(rows)
+
+        liq_df = pd.DataFrame(
+            rows
+        )
 
         st.dataframe(
             liq_df.sort_values(
@@ -1296,7 +2153,9 @@ elif mode == "💥 Liquidation Pressure":
             use_container_width=True,
             hide_index=True,
         )
+
     else:
+
         st.info(
             "Liquidation-pressure data nahi mila."
         )
@@ -1307,17 +2166,31 @@ elif mode == "💥 Liquidation Pressure":
 # ============================================================
 
 else:
+
     st.subheader(
         "🌡️ Delta L2 Liquidity Heatmap"
     )
 
     st.info(
-        "Ye current L2 snapshot ka heatmap hai. "
-        "Historical heatmap ke liye order-book snapshots "
-        "continuously store karne honge."
+        "Current L2 snapshot. "
+        "Historical heatmap ke liye snapshots store karne honge."
     )
 
-    symbols = market["Coin"].head(100).tolist()
+    symbols = (
+        market_leverage[
+            "Coin"
+        ]
+        .head(100)
+        .tolist()
+    )
+
+    if not symbols:
+
+        st.warning(
+            "20x+ leverage coins available nahi hain."
+        )
+
+        st.stop()
 
     selected = st.selectbox(
         "Coin",
@@ -1325,16 +2198,21 @@ else:
         key="heatmap_coin",
     )
 
-    if st.button("🌡️ Build Heatmap"):
+    if st.button(
+        "🌡️ Build Heatmap"
+    ):
+
         parsed = liquidity_levels(
             selected,
             depth,
         )
 
         if parsed is None:
+
             st.error(
                 "L2 data nahi mila."
             )
+
             st.stop()
 
         ob, levels = parsed
@@ -1367,7 +2245,6 @@ else:
             ]
         ].copy()
 
-        # Size based heat styling.
         styled = (
             display.style
             .background_gradient(
@@ -1391,8 +2268,7 @@ else:
         )
 
         st.caption(
-            "Green/yellow intensity = larger visible "
-            "order size in the current L2 snapshot."
+            "Heat intensity = current visible L2 size."
         )
 
 
@@ -1403,14 +2279,17 @@ else:
 st.divider()
 
 st.caption(
-    "Data source: Delta Exchange India public API. "
-    "L2 orderbook: /v2/l2orderbook/{symbol}; "
-    "public trades: /v2/trades/{symbol}; "
-    "OHLC/OI history: /v2/history/candles."
+    "Data source: Delta Exchange India public API."
 )
 
 st.caption(
-    "⚠️ Scanner analytical tool hai. Orderbook walls "
-    "cancel ho sakte hain aur liquidation-pressure "
-    "proxy actual liquidation feed nahi hai."
+    "⚠️ 20x+ Max Leverage ka matlab ye nahi hai "
+    "ki har trade par 20x+ leverage automatically available "
+    "ya suitable hai. Actual leverage limits account, "
+    "product aur current exchange rules par depend kar sakti hain."
+)
+
+st.caption(
+    "⚠️ Liquidation Pressure actual liquidation feed nahi "
+    "balki public trade + L2 + OI based proxy hai."
 )
