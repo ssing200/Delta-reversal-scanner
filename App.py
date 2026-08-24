@@ -5,14 +5,14 @@ import numpy as np
 import time
 
 # ============================================================
-# DELTA REVERSAL SCANNER - FINAL
+# DELTA REVERSAL SCANNER - FINAL CLEAN VERSION
 # >20x completely free from Vol/OI filter
 # ============================================================
 
 BASE_URL = "https://api.india.delta.exchange"
 HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Delta-Reversal-Scanner-Final/2.3",
+    "User-Agent": "Delta-Reversal-Scanner-Final/2.4",
 }
 
 st.set_page_config(
@@ -62,14 +62,33 @@ def get_perpetual_products():
         if not symbol:
             continue
 
-        default_lev = 20.0
+        # Default leverage
         try:
             default_lev = float(item.get("default_leverage") or 20)
         except:
-            pass
+            default_lev = 20.0
 
+        # Max leverage calculation (fixed)
         max_lev = default_lev
         try:
             im = float(item.get("initial_margin") or 0)
             if im > 0:
-                calculated = round(100 /
+                calculated = round(100 / im)  # 0.5 → 200, 1 → 100, 5 → 20
+                max_lev = max(calculated, default_lev)
+        except:
+            max_lev = default_lev
+
+        rows.append({
+            "Coin": symbol,
+            "ID": item.get("id"),
+            "Max Leverage": int(max_lev),
+            "Default Leverage": default_lev,
+        })
+
+    if not rows:
+        return pd.DataFrame(columns=["Coin", "ID", "Max Leverage", "Default Leverage"])
+
+    return pd.DataFrame(rows).drop_duplicates("Coin").reset_index(drop=True)
+
+
+@st
