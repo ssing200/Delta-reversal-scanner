@@ -58,6 +58,7 @@ def load_market():
             price = float(t.get("close") or t.get("mark_price") or 0)
             volume = float(t.get("volume_24h") or 0)
             oi = float(t.get("open_interest") or 0)
+            funding = float(t.get("funding_rate") or 0)
         except:
             continue
         if price <= 0:
@@ -67,53 +68,78 @@ def load_market():
             "Price": price,
             "24H Volume": volume,
             "OI": oi,
-            "Vol/OI": volume / oi if oi > 0 else 0
+            "Vol/OI": volume / oi if oi > 0 else 0,
+            "Funding": funding
         })
     
     tick_df = pd.DataFrame(tick_rows)
     market = prod_df.merge(tick_df, on="Coin", how="inner")
     return market.sort_values("24H Volume", ascending=False).reset_index(drop=True)
 
-st.write("Loading market data...")
+@st.cache_data(ttl=60)
+def get_candles(symbol, resolution="15m", hours=24):
+    end = int(time.time())
+    start = end - hours * 3600
+    result = api_get("/v2/history/candles", {
+        "resolution": resolution,
+        "symbol": symbol,
+        "start": start,
+        "end": end
+    })
+    if not result:
+        return pd.DataFrame()
+    df = pd.DataFrame(result)
+    if df.empty:
+        return df
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "time" in df.columns:
+        df = df.sort_values("time")
+    return df.dropna(subset=["close"]).reset_index(drop=True)
+
+def get_trend(df):
+    if len(df) < 20:
+        return "UNKNOWN"
+    close = df["close"]
+    ema9 = close.ewm(span=9).mean().iloc[-1]
+    ema21 = close.ewm(span=21).mean().iloc[-1]
+    last = close.iloc[-1]
+    if last > ema9 > ema21:
+        return "BULL"
+    if last < ema9 < ema21:
+        return "BEAR"
+    return "MIXED"
+
+def simple_score(row, trend):
+    score = 0
+    if trend == "BULL":
+        score += 3
+    elif trend == "BEAR":
+        score += 3
+    if row["Vol/OI"] > 3:
+        score += 2
+    elif row["Vol/OI"] > 1.5:
+        score += 1
+    if abs(row.get("Funding", 0)) > 0.0003:
+        score += 1
+    signal = "NO SIGNAL"
+    if score >= 6 and trend == "BULL":
+        signal = "STRONG LONG"
+    elif score >= 5 and trend == "BULL":
+        signal = "LONG WATCH"
+    elif score >= 6 and trend == "BEAR":
+        signal = "STRONG SHORT"
+    elif score >= 5 and trend == "BEAR":
+        signal = "SHORT WATCH"
+    return score, signal, trend
+
+# ========== MAIN ==========
+st.write("Loading market...")
 market = load_market()
 
 if market.empty:
-    st.error("Data nahi aaya. Refresh try karo.")
+    st.error("Data nahi aaya")
     st.stop()
 
-st.success(f"Loaded {len(market)} coins")
-
-with st.sidebar:
-    st.header("Settings")
-    min_vol = st.number_input("Min Vol/OI (only for ≤20x)", 0.0, 20.0, 1.5, 0.5)
-    top_n = st.slider("Show top coins", 10, 50, 30)
-    if st.button("Refresh"):
-        st.cache_data.clear()
-        st.rerun()
-
-high = market[market["Max Leverage"] > 20]
-low = market[(market["Max Leverage"] <= 20) & (market["Vol/OI"] >= min_vol)]
-
-st.write(f"**> 20x coins:** {len(high)} (free from filter)")
-st.write(f"**≤ 20x coins (filtered):** {len(low)}")
-
-tab1, tab2, tab3 = st.tabs(["All", "> 20x Leverage", "≤ 20x Leverage"])
-
-with tab1:
-    st.dataframe(market.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-with tab2:
-    st.subheader("High Leverage (>20x)")
-    if high.empty:
-        st.info("No high leverage coins")
-    else:
-        st.dataframe(high.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-with tab3:
-    st.subheader("Low Leverage (≤20x)")
-    if low.empty:
-        st.info("No coins after filter")
-    else:
-        st.dataframe(low.head(top_n)[["Coin", "Max Leverage", "Price", "24H Volume", "Vol/OI"]], use_container_width=True, hide_index=True)
-
-st.caption("Simple version | Data from Delta Exchange India")
+st.success(f"Loaded {
