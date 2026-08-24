@@ -5,9 +5,9 @@ import numpy as np
 import time
 
 BASE_URL = "https://api.india.delta.exchange"
-HEADERS = {"Accept": "application/json", "User-Agent": "Delta-Scanner/Final"}
+HEADERS = {"Accept": "application/json", "User-Agent": "Delta-Scanner"}
 
-st.set_page_config(page_title="Delta Reversal Scanner", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="Delta Scanner", page_icon="🔥", layout="wide")
 
 CACHE_TTL = 20
 DEFAULT_DEPTH = 15
@@ -33,7 +33,9 @@ def get_perpetual_products():
     for item in result:
         if item.get("contract_type") != "perpetual_futures":
             continue
-        if item.get("state") != "live" or item.get("trading_status") != "operational":
+        if item.get("state") != "live":
+            continue
+        if item.get("trading_status") != "operational":
             continue
         symbol = item.get("symbol")
         if not symbol:
@@ -50,7 +52,11 @@ def get_perpetual_products():
                 max_lev = max(calculated, default_lev)
         except:
             max_lev = default_lev
-        rows.append({"Coin": symbol, "ID": item.get("id"), "Max Leverage": int(max_lev)})
+        rows.append({
+            "Coin": symbol,
+            "ID": item.get("id"),
+            "Max Leverage": int(max_lev)
+        })
     if not rows:
         return pd.DataFrame(columns=["Coin", "ID", "Max Leverage"])
     return pd.DataFrame(rows).drop_duplicates("Coin").reset_index(drop=True)
@@ -80,7 +86,13 @@ def get_tickers():
                 funding = float(fr)
         except:
             pass
-        rows.append({"Coin": symbol, "Price": price, "24H Volume": volume, "OI": oi, "Funding": funding})
+        rows.append({
+            "Coin": symbol,
+            "Price": price,
+            "24H Volume": volume,
+            "OI": oi,
+            "Funding": funding
+        })
     df = pd.DataFrame(rows)
     if df.empty:
         return df
@@ -91,4 +103,45 @@ def get_tickers():
 def get_history(symbol, resolution="5m", hours=48):
     end = int(time.time())
     start = end - int(hours * 3600)
-    result = api_get("/v2/history/candles", {"
+    params = {
+        "resolution": resolution,
+        "symbol": symbol,
+        "start": start,
+        "end": end
+    }
+    result = api_get("/v2/history/candles", params)
+    if not result:
+        return pd.DataFrame()
+    df = pd.DataFrame(result)
+    if df.empty:
+        return df
+    for col in ["open", "high", "low", "close", "volume"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "time" in df.columns:
+        df["time"] = pd.to_numeric(df["time"], errors="coerce")
+        df = df.sort_values("time")
+    required = ["open", "high", "low", "close"]
+    if not all(c in df.columns for c in required):
+        return pd.DataFrame()
+    df = df.dropna(subset=required)
+    if "time" in df.columns:
+        df = df.drop_duplicates("time")
+    return df.reset_index(drop=True)
+
+@st.cache_data(ttl=CACHE_TTL)
+def get_oi_history(symbol, hours=48):
+    end = int(time.time())
+    start = end - int(hours * 3600)
+    params = {
+        "resolution": "15m",
+        "symbol": "OI:" + symbol,
+        "start": start,
+        "end": end
+    }
+    result = api_get("/v2/history/candles", params)
+    if not result:
+        return pd.DataFrame()
+    df = pd.DataFrame(result)
+    if df.empty or "close" not in df.columns:
+        return pd.
